@@ -157,7 +157,7 @@ async function start(){
     // bitrate hint
     try{
       var p=sender.getParameters(); if(!p.encodings||!p.encodings.length) p.encodings=[{}];
-      p.encodings[0].maxBitrate = (parseRes().h>=1080?6000000:3000000);
+      p.degradationPreference = "maintain-resolution"; p.encodings[0].maxBitrate = (parseRes().h>=1080?6000000:3000000);
       await sender.setParameters(p);
       log('maxBitrate hint applied');
     }catch(e){log('setParameters ERR '+e);}

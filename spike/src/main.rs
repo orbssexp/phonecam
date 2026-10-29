@@ -2,6 +2,7 @@ mod certs;
 mod decode;
 mod metrics;
 mod rtc;
+mod y4m;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -50,6 +51,11 @@ fn flag(name: &str) -> bool {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if let Some(p) = arg("--gen-y4m") {
+        y4m::generate(&p, 90)?;
+        println!("wrote {p}");
+        return Ok(());
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
     str0m::crypto::from_feature_flags().install_process_default();
 

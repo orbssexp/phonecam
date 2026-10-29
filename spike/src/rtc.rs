@@ -33,6 +33,7 @@ struct Session {
     connected_at: Option<Instant>,
     first_key_logged: bool,
     last_pair: String,
+    last_stat: Instant,
     frames_in: u64,
     gaps: u64,
 }
@@ -86,6 +87,7 @@ pub fn run(cfg: Config, rx: Receiver<Msg>, socks: Vec<Arc<UdpSocket>>, dec_tx: S
     let locals: Vec<SocketAddr> = socks.iter().map(|s| s.local_addr().unwrap()).collect();
     let mut sessions: HashMap<u64, Session> = HashMap::new();
     let mut last_stats_log = Instant::now();
+    let mut latest_sid: u64 = 0;
     loop {
         // drain outputs
         let mut next = Instant::now() + Duration::from_millis(500);
@@ -106,7 +108,7 @@ pub fn run(cfg: Config, rx: Receiver<Msg>, socks: Vec<Arc<UdpSocket>>, dec_tx: S
                             println!("[rtc] no socket for transmit source {}", t.source);
                         }
                     }
-                    Ok(Output::Event(e)) => handle_event(s, e, &dec_tx),
+                    Ok(Output::Event(e)) => handle_event(s, e, &dec_tx, latest_sid),
                     Err(e) => {
                         println!("[rtc] session {} poll_output error: {e:?}", s.sid);
                         s.rtc.disconnect();
@@ -147,6 +149,7 @@ pub fn run(cfg: Config, rx: Receiver<Msg>, socks: Vec<Arc<UdpSocket>>, dec_tx: S
                 }
             }
             Ok(Msg::Cmd(Cmd::Offer { sid, sdp, reply })) => {
+                latest_sid = latest_sid.max(sid);
                 let r = handle_offer(&mut sessions, sid, &sdp, &locals);
                 let _ = reply.send(r);
             }
@@ -195,6 +198,7 @@ fn handle_offer(sessions: &mut HashMap<u64, Session>, sid: u64, sdp: &str, local
             connected_at: None,
             first_key_logged: false,
             last_pair: String::new(),
+            last_stat: Instant::now(),
             frames_in: 0,
             gaps: 0,
         }
@@ -231,7 +235,7 @@ fn send_pli(s: &mut Session, mid: Mid) {
     }
 }
 
-fn handle_event(s: &mut Session, e: Event, dec_tx: &Sender<Au>) {
+fn handle_event(s: &mut Session, e: Event, dec_tx: &Sender<Au>, active: u64) {
     match e {
         Event::IceConnectionStateChange(st) => {
             println!("[ice] session {} state -> {st:?} (+{} ms)", s.sid, s.created.elapsed().as_millis());
@@ -281,7 +285,9 @@ fn handle_event(s: &mut Session, e: Event, dec_tx: &Sender<Au>) {
             if s.need_key {
                 return; // wait for IDR before feeding the decoder
             }
-            let _ = dec_tx.send(Au { data: d.data.clone(), key, at: d.network_time });
+            if s.sid == active {
+                let _ = dec_tx.send(Au { data: d.data.clone(), key, at: d.network_time });
+            }
         }
         Event::ChannelOpen(cid, label) => {
             println!("[dc] channel open id={cid:?} label={label}");
@@ -297,18 +303,25 @@ fn handle_event(s: &mut Session, e: Event, dec_tx: &Sender<Au>) {
             }
         }
         Event::PeerStats(ps) => {
-            let _ = ps;
+            if let Some(p) = ps.selected_candidate_pair {
+                let cur = format!("{:?} local={} remote={}", p.protocol, p.local.addr, p.remote.addr);
+                if cur != s.last_pair {
+                    println!("[ice] session {} NOMINATED pair: {cur} rtt={:?}", s.sid, p.current_round_trip_time);
+                    s.last_pair = cur;
+                }
+            }
+            if let Some(l) = ps.ingress_loss_fraction {
+                if l > 0.0 {
+                    println!("[stats] session {} ingress loss fraction {l:.3}", s.sid);
+                }
+            }
         }
         Event::MediaIngressStats(st) => {
-            let line = format!("{:?}", st);
-            if s.frames_in % 1 == 0 && line.len() < 4000 {
-                // log compactly once every ~5 s
-                if s.created.elapsed().as_secs() % 5 == 0 {
-                    println!("[stats] ingress {}", line.chars().take(300).collect::<String>());
-                }
+            if s.created.elapsed().as_secs() % 10 == 0 && s.last_stat.elapsed() > Duration::from_secs(5) {
+                s.last_stat = Instant::now();
+                println!("[stats] ingress pkts={} nacks={} plis={} loss={:?} jitter={:?}", st.packets, st.nacks, st.plis, st.loss, st.jitter);
             }
         }
         _ => {}
     }
-    let _ = &s.last_pair;
 }
