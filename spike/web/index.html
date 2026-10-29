@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>PhoneCam spike sender</title>
+<style>
+  body{font:14px -apple-system,system-ui,sans-serif;margin:0;padding:12px;background:#111;color:#eee}
+  button,select{font-size:16px;padding:10px 14px;margin:4px 4px 4px 0;border-radius:8px;border:1px solid #444;background:#222;color:#eee}
+  button.big{background:#0a84ff;border:0;font-size:20px;padding:14px 24px}
+  video{width:100%;max-height:35vh;background:#000;border-radius:8px}
+  pre{white-space:pre-wrap;word-break:break-all;background:#000;padding:8px;border-radius:8px;font-size:12px;max-height:30vh;overflow:auto}
+  h3{margin:10px 0 4px}
+</style>
+</head>
+<body>
+<button id="start" class="big">Start</button>
+<button id="restart">ICE restart</button>
+<button id="stop">Stop</button>
+<div>
+  <select id="lens"></select>
+  <select id="res">
+    <option value="1920x1080@30">1080p30</option>
+    <option value="1280x720@30">720p30</option>
+    <option value="1920x1080@60">1080p60</option>
+    <option value="3840x2160@30">4K30</option>
+    <option value="640x480@30">480p30</option>
+  </select>
+</div>
+<div>
+  <button id="zoomUp">zoom +</button><button id="zoomDn">zoom -</button><button id="torch">torch toggle</button>
+</div>
+<video id="v" playsinline muted autoplay></video>
+<h3>Track capabilities</h3><pre id="caps">-</pre>
+<h3>Applied settings / stats</h3><pre id="stats">-</pre>
+<h3>Log</h3><pre id="log"></pre>
+<script>
+(function(){
+'use strict';
+var $ = function(id){return document.getElementById(id);};
+var ws=null, pc=null, track=null, stream=null, ctl=null, sender=null, torchOn=false, statsTimer=null, wsOpenQ=[];
+var params = new URLSearchParams(location.search);
+
+function log(m){
+  var line=(performance.now()/1000).toFixed(2)+' '+m;
+  $('log').textContent += line+'\n';
+  $('log').scrollTop = 1e9;
+  try{ if(ws && ws.readyState===1) ws.send(JSON.stringify({type:'log',msg:m})); }catch(e){}
+}
+window.onerror=function(m){log('ERR '+m);};
+
+function openWs(){
+  return new Promise(function(res,rej){
+    var url=(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';
+    ws=new WebSocket(url);
+    ws.onopen=function(){log('ws open '+url);res();};
+    ws.onerror=function(){rej(new Error('ws error'));};
+    ws.onclose=function(){log('ws closed');};
+    ws.onmessage=function(ev){
+      var m=JSON.parse(ev.data);
+      if(m.type==='answer'){ pc.setRemoteDescription({type:'answer',sdp:m.sdp}).then(function(){log('answer applied');}).catch(function(e){log('answer ERR '+e);}); }
+      else if(m.type==='hello'){ log('hello addrs='+JSON.stringify(m.addresses)); }
+      else if(m.type==='restart_ice'){ log('server asked restart_ice'); iceRestart(); }
+      else if(m.type==='error'){ log('server error '+m.msg); }
+    };
+  });
+}
+
+async function listLenses(){
+  try{
+    var devs=await navigator.mediaDevices.enumerateDevices();
+    var cams=devs.filter(function(d){return d.kind==='videoinput';});
+    var sel=$('lens'); sel.innerHTML='';
+    cams.forEach(function(d,i){var o=document.createElement('option');o.value=d.deviceId;o.textContent=(d.label||('camera '+i));sel.appendChild(o);});
+    log('lenses: '+JSON.stringify(cams.map(function(d){return d.label;})));
+  }catch(e){log('enumerateDevices ERR '+e);}
+}
+
+function parseRes(){
+  var m=$('res').value.match(/(\d+)x(\d+)@(\d+)/);
+  return {w:+m[1],h:+m[2],f:+m[3]};
+}
+
+async function getCam(){
+  var r=parseRes();
+  var vc={width:{ideal:r.w},height:{ideal:r.h},frameRate:{ideal:r.f}};
+  if($('lens').value) vc.deviceId={exact:$('lens').value};
+  if(stream){stream.getTracks().forEach(function(t){t.stop();});}
+  stream=await navigator.mediaDevices.getUserMedia({video:vc,audio:false});
+  track=stream.getVideoTracks()[0];
+  $('v').srcObject=stream;
+  var caps = track.getCapabilities ? track.getCapabilities() : {};
+  var st = track.getSettings();
+  $('caps').textContent = JSON.stringify(caps,null,1)+'\nsettings: '+JSON.stringify(st);
+  log('capabilities: '+JSON.stringify(caps));
+  log('settings: '+JSON.stringify(st));
+  track.onended=function(){log('track ended');};
+  track.onmute=function(){log('track muted');};
+  track.onunmute=function(){log('track unmuted');};
+  await listLenses();
+}
+
+function h264Only(tc){
+  var caps=RTCRtpSender.getCapabilities('video').codecs.filter(function(c){return c.mimeType.toLowerCase()==='video/h264';});
+  // prefer packetization-mode=1
+  caps.sort(function(a,b){
+    var am=(a.sdpFmtpLine||'').indexOf('packetization-mode=1')>=0?0:1;
+    var bm=(b.sdpFmtpLine||'').indexOf('packetization-mode=1')>=0?0:1;
+    return am-bm;
+  });
+  log('H264 codecs offered: '+caps.map(function(c){return c.sdpFmtpLine;}).join(' | '));
+  tc.setCodecPreferences(caps);
+}
+
+function waitIce(pc){
+  return new Promise(function(res){
+    if(pc.iceGatheringState==='complete'){res();return;}
+    var done=false;
+    function fin(){ if(!done){done=true;res();} }
+    pc.addEventListener('icegatheringstatechange',function(){ if(pc.iceGatheringState==='complete') fin(); });
+    setTimeout(fin,2500);
+  });
+}
+
+async function sendOffer(opts){
+  var offer=await pc.createOffer(opts||{});
+  await pc.setLocalDescription(offer);
+  await waitIce(pc);
+  var sdp=pc.localDescription.sdp;
+  var cands=sdp.split('\n').filter(function(l){return l.indexOf('a=candidate')===0;});
+  log('offer candidates ('+cands.length+'): '+cands.join(' || '));
+  ws.send(JSON.stringify({type:'offer',sdp:sdp}));
+}
+
+async function start(){
+  try{
+    $('start').disabled=true;
+    await getCam();
+    await openWs();
+    pc=new RTCPeerConnection({iceServers:[],bundlePolicy:'max-bundle'});
+    pc.oniceconnectionstatechange=function(){log('iceConnectionState='+pc.iceConnectionState);};
+    pc.onconnectionstatechange=function(){log('connectionState='+pc.connectionState);};
+    pc.onicecandidateerror=function(e){log('icecandidateerror '+e.errorCode+' '+e.errorText);};
+    ctl=pc.createDataChannel('ctl',{ordered:true});
+    ctl.onopen=function(){
+      log('ctl open');
+      ctl.send(JSON.stringify({type:'caps',caps:track.getCapabilities?track.getCapabilities():{},settings:track.getSettings(),ua:navigator.userAgent}));
+    };
+    ctl.onmessage=function(ev){
+      try{var m=JSON.parse(ev.data); if(m.type==='ping'){ctl.send(JSON.stringify({type:'pong',t:m.t}));}}catch(e){}
+      log('ctl msg '+ev.data);
+    };
+    var tc=pc.addTransceiver(track,{direction:'sendonly',streams:[stream]});
+    sender=tc.sender;
+    h264Only(tc);
+    await sendOffer();
+    // bitrate hint
+    try{
+      var p=sender.getParameters(); if(!p.encodings||!p.encodings.length) p.encodings=[{}];
+      p.encodings[0].maxBitrate = (parseRes().h>=1080?6000000:3000000);
+      await sender.setParameters(p);
+      log('maxBitrate hint applied');
+    }catch(e){log('setParameters ERR '+e);}
+    if(statsTimer) clearInterval(statsTimer);
+    statsTimer=setInterval(pollStats,2000);
+  }catch(e){ log('start ERR '+e); $('start').disabled=false; }
+}
+
+async function iceRestart(){
+  if(!pc) return;
+  log('ICE restart requested');
+  try{ await sendOffer({iceRestart:true}); }catch(e){log('restart ERR '+e);}
+}
+
+async function pollStats(){
+  if(!pc) return;
+  try{
+    var rep=await pc.getStats(), out=[], pairId=null;
+    rep.forEach(function(s){
+      if(s.type==='outbound-rtp' && s.kind==='video'){
+        out.push('out '+s.frameWidth+'x'+s.frameHeight+' fps='+s.framesPerSecond+' sent='+s.framesSent+' bytes='+s.bytesSent+' keyframes='+s.keyFramesEncoded+' pli='+s.pliCount+' nack='+s.nackCount+' enc='+(s.encoderImplementation||'?')+' limit='+(s.qualityLimitationReason||''));
+      }
+      if(s.type==='transport' && s.selectedCandidatePairId) pairId=s.selectedCandidatePairId;
+    });
+    if(pairId){
+      var p=rep.get(pairId), l=rep.get(p.localCandidateId), r=rep.get(p.remoteCandidateId);
+      out.push('pair local='+(l&&(l.address||l.ip))+':'+(l&&l.port)+' '+(l&&l.candidateType)+' remote='+(r&&(r.address||r.ip))+':'+(r&&r.port)+' rtt='+p.currentRoundTripTime);
+    }
+    var txt=out.join('\n'); $('stats').textContent=txt; log('stats '+txt.replace(/\n/g,' ; '));
+  }catch(e){}
+}
+
+async function applyC(c){
+  try{
+    await track.applyConstraints({advanced:[c]});
+    var s=track.getSettings();
+    log('applyConstraints '+JSON.stringify(c)+' OK; settings.zoom='+s.zoom+' torch='+s.torch);
+  }catch(e){ log('applyConstraints '+JSON.stringify(c)+' FAIL '+e); }
+}
+var zoom=1;
+$('zoomUp').onclick=function(){zoom=Math.min(zoom+0.5,10);applyC({zoom:zoom});};
+$('zoomDn').onclick=function(){zoom=Math.max(zoom-0.5,1);applyC({zoom:zoom});};
+$('torch').onclick=function(){torchOn=!torchOn;applyC({torch:torchOn});};
+$('start').onclick=start;
+$('restart').onclick=iceRestart;
+$('stop').onclick=function(){ if(pc){pc.close();pc=null;} if(stream){stream.getTracks().forEach(function(t){t.stop();});} $('start').disabled=false; log('stopped'); };
+
+if(params.get('res')){ $('res').value=params.get('res'); }
+if(params.get('auto')==='1'){ setTimeout(start,300); }
+else { navigator.mediaDevices && navigator.mediaDevices.enumerateDevices && listLenses(); }
+})();
+</script>
+</body>
+</html>

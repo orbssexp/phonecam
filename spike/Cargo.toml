@@ -1,0 +1,27 @@
+[package]
+name = "spike-rx"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+str0m = { version = "0.24", default-features = false, features = ["wincrypto"] }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+qrcode = "0.14"
+if-addrs = "0.13"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures-util = "0.3"
+
+[build-dependencies]
+cc = "1"
