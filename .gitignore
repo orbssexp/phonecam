@@ -2,3 +2,5 @@ target/
 spike/vendor/
 spike/metrics.csv
 node_modules/
+spike/*.log
+spike/*.csv
