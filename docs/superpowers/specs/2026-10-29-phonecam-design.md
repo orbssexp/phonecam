@@ -9,7 +9,7 @@ Use an iPhone camera as a Windows webcam, replacing Iriun Webcam. Beat Iriun on:
 
 1. **Connection stability** — no drops in long sessions; Wi-Fi primary, USB fallback, automatic recovery.
 2. **Camera control** — lens, resolution/FPS, zoom, torch, mirror, rotation.
-3. **Interruption resilience** — phone calls / app backgrounding must not kill the virtual webcam in other apps.
+3. **Interruption resilience** — phone calls / app backgrounding must not kill the virtual webcam in other apps. (The video itself does stop — iOS revokes the camera — but the "PhoneCam" device stays alive with a placeholder and the stream resumes without user action on the PC.)
 4. **Low resource usage** — "light" means **RAM + CPU/GPU at runtime**, not install size.
 5. **Battery on the phone** — black-screen mode, energy profiles.
 
@@ -27,7 +27,8 @@ All Phase 1 code that isn't platform-specific must be portable to Phase 2 (and t
 - iOS revokes camera access when the app/page goes to background, the phone locks, or a call comes in. No app can bypass this. We mitigate (§7) rather than prevent.
 - Safari cannot control screen brightness. Phase 1 uses a black overlay instead; Phase 2 sets brightness natively.
 - Safari `getUserMedia` requires a secure context → the desktop app serves HTTPS with a local certificate the user trusts once on the iPhone.
-- Safari exposes lens choice (via `enumerateDevices`), resolution/FPS, zoom and torch (via `applyConstraints`). Manual focus/exposure is Phase 2 only.
+- Safari exposes lens choice (via `enumerateDevices`) and resolution/FPS. `zoom` and `torch` constraints are **not guaranteed** on iOS Safari — availability is verified in Round 0 on the user's iPhone/iOS version. If `zoom` is unavailable, zoom falls back to lens switching + desktop-side digital crop. If `torch` is unavailable, the control is hidden. Manual focus/exposure is Phase 2 only.
+- Safari's encoder bitrate and max resolution are browser-controlled; `RTCRtpSender.setParameters({maxBitrate})` is a hint. 1080p60 / 4K are best-effort.
 - USB fallback in Phase 1 uses iPhone **Personal Hotspot over USB** (creates a 172.20.10.x network). Requires hotspot enabled; some carriers block it.
 
 ## 4. Stack
@@ -36,9 +37,9 @@ All Phase 1 code that isn't platform-specific must be portable to Phase 2 (and t
 |---|---|---|
 | Core logic | Rust | Portable to iOS (UniFFI) and macOS; no GC; low RAM/CPU |
 | WebRTC | `str0m` (sans-IO Rust WebRTC) | Lightweight, runs on Windows and iOS; we own the I/O loop |
-| Decode | FFmpeg (`ffmpeg-next`) | NVDEC, D3D11VA and software decoding behind one API |
+| Decode | FFmpeg (`ffmpeg-next`), **LGPL build, dynamically linked, only the H.264 decoder + hwaccels enabled** | NVDEC, D3D11VA and software decoding behind one API; minimal build keeps RAM and licensing clean |
 | Color convert | libyuv (or GPU path) | SIMD NV12→BGR, ~1% CPU |
-| Virtual webcam | softcam (DirectShow) | Proven approach (same family as OBS VirtualCam); visible in Zoom/Teams/Discord/OBS/Chrome |
+| Virtual webcam | softcam (DirectShow), **both 32-bit and 64-bit filter DLLs registered** | Proven approach (same family as OBS VirtualCam); visible in Zoom/Teams/Discord/OBS/Chrome, including 32-bit host apps |
 | Desktop shell | Tauri 2 | Rust backend + WebView2 UI |
 | UI | React + TypeScript + Tailwind + shadcn/ui + lucide-react | Requested design system; dark mode only |
 | Phone page | TypeScript, vanilla (no framework) | Smallest, fastest page on the phone |
@@ -53,7 +54,8 @@ phonecam/
 ├─ crates/
 │  ├─ phonecam-core        # SHARED, pure: protocol, controls, profiles, heartbeat,
 │  │                       # reconnection state machine, path priority. No I/O, no threads.
-│  ├─ phonecam-transport   # SHARED: str0m WebRTC + signaling client/server; sender & receiver roles
+│  ├─ phonecam-transport   # SHARED: str0m WebRTC + signaling server. Phase 1 implements and tests
+│  │                       # only the RECEIVER role; API is role-agnostic so Phase 2 can add the sender.
 │  ├─ phonecam-ffi         # SHARED: UniFFI bindings (Phase 2 consumer; stub in Phase 1)
 │  ├─ decode-win           # Windows: FFmpeg decoder with Auto/NVDEC/D3D11/CPU
 │  └─ vcam-win             # Windows: softcam wrapper + placeholder frames
@@ -87,10 +89,13 @@ iPhone (Safari)                          Windows (Tauri)
 
 ## 7. Connection & resilience
 
-### 7.1 Path priority
-- ICE gathers candidates on every interface: Wi-Fi and USB-hotspot (172.20.10.x).
-- Core assigns priority: **Wi-Fi > USB** (configurable). Nominated pair follows priority; on failure of the active pair, switch to the next valid pair without renegotiating the session.
-- UI shows the active path badge (Wi-Fi / USB) and latency.
+### 7.1 Path priority (Wi-Fi first, USB fallback)
+- The desktop enumerates its interfaces and classifies each as **Wi-Fi**, **USB-hotspot** (Apple Mobile Device Ethernet / 172.20.10.0/28) or **other**.
+- The desktop is an **ICE-lite** endpoint (str0m supports it); Safari is the controlling agent and nominates. The desktop influences the choice through **candidate local-preference**: Wi-Fi host candidates get the highest priority, USB-hotspot next. (Mechanism to be confirmed in Round 0; see §17.)
+- Safari exposes real host candidates once camera permission is granted; the desktop also accepts peer-reflexive candidates, so mDNS `.local` candidates are never required.
+- **Failover:** when the heartbeat (§7.2) detects loss, the desktop triggers an ICE restart. Its new offer/answer lists only candidates on interfaces that are currently up, so the session moves to USB if Wi-Fi is gone. When Wi-Fi comes back and stays stable for 30 s, the desktop triggers one ICE restart to move back to Wi-Fi.
+- **Signaling on multiple paths:** in `hello`, the desktop sends the page a list of all its addresses (Wi-Fi and USB). If the WSS drops, the page tries those addresses in priority order. The leaf certificate's SAN covers every current address, including 172.20.10.x, so any of them works without a certificate warning (§13).
+- The UI shows the active path badge (Wi-Fi / USB) and the RTT measured by the heartbeat on the active path.
 
 ### 7.2 Heartbeat & recovery
 - Ping every 2 s over DataChannel; pong carries phone battery and camera state.
@@ -138,7 +143,7 @@ Unsupported capabilities (per `getCapabilities()`) are hidden, not disabled.
 |---|---|---|
 | Economy | 720p30 | ~2.5 Mbps |
 | Balanced (default) | 1080p30 | ~5 Mbps |
-| Quality | 1080p60 (4K30 if supported) | ~10–20 Mbps |
+| Quality | 1080p60 (4K30 if supported) — best-effort, Safari may cap at 1080p30 | ~10–20 Mbps (hint via `maxBitrate`) |
 
 Phone sends exactly the selected resolution — no scaling on the PC.
 
@@ -146,19 +151,24 @@ Phone sends exactly the selected resolution — no scaling on the PC.
 
 ## 10. Decoder selection
 
-- Setting: **Auto (default)** | NVIDIA (NVDEC) | GPU (D3D11VA) | CPU.
-- Auto order: NVDEC if an NVIDIA GPU is present → D3D11VA → CPU.
+- Setting: **Auto (default)** | NVIDIA (CUDA/NVDEC) | GPU (D3D11VA) | CPU.
+- Auto order: **D3D11VA on the NVIDIA adapter** if an NVIDIA GPU is present (it uses the same NVDEC hardware without loading the CUDA runtime, which saves RAM) → D3D11VA on any other GPU → CPU.
+- "NVIDIA (CUDA/NVDEC)" is an explicit opt-in; it costs more RAM (CUDA context) and is excluded from the tray-only RAM target.
 - Any hardware init/decode failure falls back to the next option automatically and the UI shows a notice.
 - UI shows active decoder and app CPU/GPU usage.
 - Note: encoding happens on the iPhone (always hardware). The PC only decodes.
 
-## 11. Performance budgets (enforced by test)
+## 11. Performance targets (measured by test)
 
-| Scenario | RAM (whole app) | CPU |
+These are **targets** that Round 0 validates; if the spike shows one is unrealistic, the number is revised in this spec before Round 1 rather than silently missed.
+
+**Measurement method:** RAM = sum of **private working set** across the app's whole process tree (Rust main process + every WebView2 child process when a window exists). CPU = average % of total CPU across all cores over 10 min, sampled every 1 s, same process tree. Reference machine: the user's PC.
+
+| Scenario | RAM (whole process tree) | CPU |
 |---|---|---|
-| Tray only, streaming 1080p30, NVDEC | < 40 MB | < 3% |
+| Tray only, streaming 1080p30, Auto (D3D11VA) | < 40 MB | < 3% |
 | Tray only, streaming 1080p30, CPU decode | < 50 MB | < 10% |
-| Window open, streaming, preview on | < 150 MB | < 6% |
+| Window open, streaming, preview on | < 180 MB | < 6% |
 
 Techniques:
 - Full-resolution frames never cross into the UI.
@@ -186,16 +196,25 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
 
 ## 13. First-time setup (HTTPS trust)
 
-1. App generates a local root CA (stored in app data) and a leaf cert for its LAN/USB IPs (regenerated when IPs change).
-2. Empty state shows QR #1 → downloads the CA as an iOS configuration profile.
-3. User installs it, then enables it in Settings → General → About → Certificate Trust Settings (instructions shown with screenshots).
-4. QR #2 → opens the camera page. After setup, only QR #2 is shown.
+1. App generates a local root CA (stored in app data) with **X.509 Name Constraints** limiting it to private IP ranges (10/8, 172.16/12, 192.168/16) and `phonecam.local`, so even if its key leaked it could not impersonate public sites. The CA key file is readable only by the current Windows user.
+2. The app issues a leaf cert with **SAN IP entries for every current address** (Wi-Fi, USB 172.20.10.x, others), **validity ≤ 398 days** (the iOS limit). The leaf is re-issued when the address set changes or 30 days before expiry, and hot-reloaded by the HTTPS server; the CA does not change, so the phone needs no new trust step.
+3. The empty state shows QR #1 → a **plain HTTP** URL on a separate setup port that serves only the CA as an iOS `.mobileconfig`. HTTP is used to avoid a chicken-and-egg problem: HTTPS can't be trusted before the CA is installed. The setup port closes once a phone has connected over HTTPS.
+4. The user installs the profile and enables it in Settings → General → About → Certificate Trust Settings. Instructions are shown with screenshots.
+5. QR #2 → opens the HTTPS camera page, which includes the pairing secret (§14a). After setup, only QR #2 is shown.
 
 ## 14. Protocol (summary)
 
 - Signaling (WSS, JSON): `hello{token,role,version}`, `offer`, `answer`, `ice`, `bye`.
 - Control (DataChannel `ctl`, JSON): `ping{t}` / `pong{t,battery,charging,camState}`, `set{lens|res|fps|zoom|torch|profile}`, `state{...actual values, capabilities}`, `paused{reason}`, `resumed`.
 - Versioned (`version` field); Rust types are the source of truth; TS types generated.
+
+## 14a. Security & Windows integration
+
+- **Pairing:** the desktop generates a random 128-bit pairing secret. QR #2's URL carries it in the fragment (`#k=…`, which never leaves the phone in HTTP requests). `hello` must include an HMAC of a server nonce computed with that secret; otherwise the WSS closes. A successful pairing yields a long-lived device token, stored in the page's `localStorage` and in desktop app data, for reconnects. "Forget phone" in the UI revokes it and rotates the secret.
+- **One phone at a time:** a second paired device is rejected while one is live.
+- **LAN exposure:** servers bind only to private-range interfaces (never public IPs), and the HTTPS server serves only the camera page and the WSS endpoint.
+- **Windows Firewall:** the installer adds inbound rules for the app's ports on the **Private** profile only. If the active network is classified Public, the UI shows a tip.
+- **Single instance:** a second launch focuses the existing tray app instead.
 
 ## 15. Error handling
 
@@ -207,16 +226,25 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
 - **Unit (Rust, `cargo test`):** core reconnection state machine (all transitions), heartbeat timing, path priority, profiles, protocol serde.
 - **Unit (TS, Vitest):** phone page control handling, pinch→zoom mapping, interruption handling (mocked tracks).
 - **Integration:** headless Chromium sender (fake camera) ↔ desktop receiver over loopback: connect, drop network, verify ICE restart, verify placeholder frames, verify recovery.
-- **Performance test:** scripted 10-minute stream at 1080p30, measures RAM/CPU against §11 budgets.
+- **Performance test:** scripted 10-minute stream at 1080p30, measures RAM/CPU against §11 targets using the §11 method.
+- **Virtual camera:** automated check that "PhoneCam" enumerates through DirectShow from both a 32-bit and a 64-bit test host and delivers frames in each state (Idle/Live/Reconnecting/Paused).
 - **Manual checklist (real iPhone):** Wi-Fi drop → USB takeover, incoming call → paused → resume, lock/unlock, 2-hour session, each decoder mode.
 
 ## 17. Delivery plan outline (token-economy)
 
-- **Round 0 (spike, Opus-reviewed):** Safari → str0m → NVDEC/CPU → softcam over Wi-Fi. Go/no-go for str0m. Fallback if no-go: Electron with the same React UI.
+- **Round 0 (spike, Opus-reviewed):** a throwaway Rust binary plus a minimal Safari page. Checkpoints, each with a pass/fail result written to `docs/spike-results.md`:
+  1. Safari H.264 → str0m ICE-lite: the connection establishes and frames get depacketized into complete access units.
+  2. Keyframe recovery: on packet loss, str0m sends a PLI/NACK and Safari responds with a keyframe within 1 s.
+  3. Decode with D3D11VA (NVIDIA adapter), CUDA/NVDEC and CPU; measure RAM/CPU for each against the §11 targets.
+  4. softcam: frames visible in a 64-bit and a 32-bit DirectShow host.
+  5. Multi-path: with Wi-Fi + USB hotspot both up, check which pair gets nominated, then test the ICE-restart failover from Wi-Fi to USB.
+  6. On the user's iPhone: the `zoom`/`torch` capabilities, the lens list, and the maximum resolution/FPS actually delivered.
+  - **No-go criteria:** checkpoint 1 or 2 can't be made to pass within the spike. **Fallback** (keeps the Rust core and the portability goal): swap str0m for `webrtc-rs`, which has a fuller RTP pipeline (NACK/TWCC interceptors), behind the same `phonecam-transport` API. Electron is not a fallback.
+  - The §11 targets get revised from checkpoint 3 and 6 results before Round 1.
 - **Round 1 (≤3 agents, separate worktrees):** (1) `decode-win` + `vcam-win`; (2) `phonecam-core` + `phonecam-transport` + HTTPS/WSS + cert; (3) `web-client`.
 - **Round 2 (≤3 agents):** (1) desktop React/shadcn UI + tray lifecycle; (2) resilience integration (§7); (3) tests + perf harness.
 - `npm install` / `cargo build` serialized; never in parallel.
 
 ## 18. Out of scope (Phase 1)
 
-Audio, multiple phones at once, Android, macOS receiver, manual focus/exposure/WB, auto brightness, recording, auto-updates, App Store app.
+Audio, multiple phones at once, Android, macOS receiver, manual focus/exposure/WB, auto brightness, recording, auto-updates, start-with-Windows, App Store app.
