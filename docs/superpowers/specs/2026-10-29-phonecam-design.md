@@ -1,7 +1,7 @@
 # PhoneCam — Design Spec
 
 Date: 2026-10-29
-Status: Draft (awaiting user review)
+Status: Reviewed — awaiting user approval
 
 ## 1. Goal
 
@@ -93,7 +93,7 @@ iPhone (Safari)                          Windows (Tauri)
 - The desktop enumerates its interfaces and classifies each as **Wi-Fi**, **USB-hotspot** (Apple Mobile Device Ethernet / 172.20.10.0/28) or **other**.
 - The desktop is an **ICE-lite** endpoint (str0m supports it); Safari is the controlling agent and nominates. The desktop influences the choice through **candidate local-preference**: Wi-Fi host candidates get the highest priority, USB-hotspot next. (Mechanism to be confirmed in Round 0; see §17.)
 - Safari exposes real host candidates once camera permission is granted; the desktop also accepts peer-reflexive candidates, so mDNS `.local` candidates are never required.
-- **Failover:** when the heartbeat (§7.2) detects loss, the desktop triggers an ICE restart. Its new offer/answer lists only candidates on interfaces that are currently up, so the session moves to USB if Wi-Fi is gone. When Wi-Fi comes back and stays stable for 30 s, the desktop triggers one ICE restart to move back to Wi-Fi.
+- **Failover:** the phone is always the offerer, including on restarts. When the heartbeat (§7.2) detects loss, the desktop sends `restart_ice` over WSS (or the phone detects loss itself). The phone then creates an ICE-restart offer, and the desktop's answer lists only candidates on interfaces that are currently up, so the session moves to USB if Wi-Fi is gone. When Wi-Fi comes back and stays stable for 30 s, the desktop sends one `restart_ice` to move back to Wi-Fi. If local-preference turns out not to steer Safari's choice (Round 0 checkpoint 5), the desktop prunes its advertised candidates down to the preferred path.
 - **Signaling on multiple paths:** in `hello`, the desktop sends the page a list of all its addresses (Wi-Fi and USB). If the WSS drops, the page tries those addresses in priority order. The leaf certificate's SAN covers every current address, including 172.20.10.x, so any of them works without a certificate warning (§13).
 - The UI shows the active path badge (Wi-Fi / USB) and the RTT measured by the heartbeat on the active path.
 
@@ -196,7 +196,7 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
 
 ## 13. First-time setup (HTTPS trust)
 
-1. App generates a local root CA (stored in app data) with **X.509 Name Constraints** limiting it to private IP ranges (10/8, 172.16/12, 192.168/16) and `phonecam.local`, so even if its key leaked it could not impersonate public sites. The CA key file is readable only by the current Windows user.
+1. App generates a local root CA (stored in app data) with **X.509 Name Constraints** limiting it to private IP ranges (10/8, 172.16/12, 192.168/16) and `phonecam.local`, so even if its key leaked it could not impersonate public sites. The CA key file is readable only by the current Windows user. CA validity: 10 years.
 2. The app issues a leaf cert with **SAN IP entries for every current address** (Wi-Fi, USB 172.20.10.x, others), **validity ≤ 398 days** (the iOS limit). The leaf is re-issued when the address set changes or 30 days before expiry, and hot-reloaded by the HTTPS server; the CA does not change, so the phone needs no new trust step.
 3. The empty state shows QR #1 → a **plain HTTP** URL on a separate setup port that serves only the CA as an iOS `.mobileconfig`. HTTP is used to avoid a chicken-and-egg problem: HTTPS can't be trusted before the CA is installed. The setup port closes once a phone has connected over HTTPS.
 4. The user installs the profile and enables it in Settings → General → About → Certificate Trust Settings. Instructions are shown with screenshots.
@@ -204,7 +204,7 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
 
 ## 14. Protocol (summary)
 
-- Signaling (WSS, JSON): `hello{token,role,version}`, `offer`, `answer`, `ice`, `bye`.
+- Signaling (WSS, JSON): `hello{token,role,version,hmac}`, `welcome{addresses[]}`, `offer` (always phone → desktop), `answer`, `ice`, `restart_ice` (desktop → phone), `bye`.
 - Control (DataChannel `ctl`, JSON): `ping{t}` / `pong{t,battery,charging,camState}`, `set{lens|res|fps|zoom|torch|profile}`, `state{...actual values, capabilities}`, `paused{reason}`, `resumed`.
 - Versioned (`version` field); Rust types are the source of truth; TS types generated.
 
@@ -218,12 +218,12 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
 
 ## 15. Error handling
 
-- Every failure surfaces as a state in core, never a crash: decoder failure → fallback; softcam missing → UI error with "Repair" (re-register, needs admin once); cert expired → regenerate + show QR #1 again; port in use → pick next free port and update QR.
+- Every failure surfaces as a state in core, never a crash: decoder failure → fallback; softcam missing → UI error with "Repair" (re-register, needs admin once); leaf cert expiring → rotated silently (§13); CA expired/lost/regenerated → the app shows QR #1 again; port in use → pick next free port and update QR.
 - Logs: rotating file in app data, 5 MB cap.
 
 ## 16. Testing
 
-- **Unit (Rust, `cargo test`):** core reconnection state machine (all transitions), heartbeat timing, path priority, profiles, protocol serde.
+- **Unit (Rust, `cargo test`):** core reconnection state machine (all transitions), heartbeat timing, path priority, profiles, protocol serde, pairing HMAC handshake (valid/invalid/replayed), device-token revocation and secret rotation.
 - **Unit (TS, Vitest):** phone page control handling, pinch→zoom mapping, interruption handling (mocked tracks).
 - **Integration:** headless Chromium sender (fake camera) ↔ desktop receiver over loopback: connect, drop network, verify ICE restart, verify placeholder frames, verify recovery.
 - **Performance test:** scripted 10-minute stream at 1080p30, measures RAM/CPU against §11 targets using the §11 method.
@@ -239,6 +239,7 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
   4. softcam: frames visible in a 64-bit and a 32-bit DirectShow host.
   5. Multi-path: with Wi-Fi + USB hotspot both up, check which pair gets nominated, then test the ICE-restart failover from Wi-Fi to USB.
   6. On the user's iPhone: the `zoom`/`torch` capabilities, the lens list, and the maximum resolution/FPS actually delivered.
+  7. On the user's iPhone: the name-constrained CA installs, gets trusted, and the HTTPS page loads with no warning. If iOS rejects the Name Constraints, drop the extension and keep the other mitigations.
   - **No-go criteria:** checkpoint 1 or 2 can't be made to pass within the spike. **Fallback** (keeps the Rust core and the portability goal): swap str0m for `webrtc-rs`, which has a fuller RTP pipeline (NACK/TWCC interceptors), behind the same `phonecam-transport` API. Electron is not a fallback.
   - The §11 targets get revised from checkpoint 3 and 6 results before Round 1.
 - **Round 1 (≤3 agents, separate worktrees):** (1) `decode-win` + `vcam-win`; (2) `phonecam-core` + `phonecam-transport` + HTTPS/WSS + cert; (3) `web-client`.
