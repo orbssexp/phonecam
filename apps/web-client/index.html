@@ -389,7 +389,7 @@ async function computeProof(secret, nonce){
   var enc = new TextEncoder();
   var key = await crypto.subtle.importKey(
     'raw',
-    enc.encode(secret),
+    new Uint8Array(secret.match(/../g).map(function(h){ return parseInt(h, 16); })),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign']
