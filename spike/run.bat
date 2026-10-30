@@ -6,3 +6,7 @@ set SC=%~dp0vendor\softcam-src\src\softcam\dist\bin\x64
 set PATH=%FF%;%SC%;%PATH%
 cd /d %~dp0
 target\release\spike-rx.exe %*
+
+echo.
+echo spike-rx exited. Press any key to close.
+pause >nul
