@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(buf[corner_idx..corner_idx + 3], [32, 32, 32]);
 
         // There should be white pixels drawn near the center
-        let has_white = buf.as_chunks::<3>().0.iter().any(|&p| p == [255, 255, 255]);
+        let has_white = buf.as_chunks::<3>().0.contains(&[255, 255, 255]);
         assert!(has_white, "Rendered text should contain white pixels");
     }
 }
