@@ -12,9 +12,22 @@ pub struct Certs {
     pub leaf_key_pem: String,
 }
 
+/// CA key + cert persist in %LOCALAPPDATA%\PhoneCam-spike so the profile installed on the
+/// iPhone keeps matching across runs. Only the leaf is regenerated.
+fn ca_store() -> std::path::PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA").map(Into::into).unwrap_or_else(|| std::env::temp_dir());
+    std::path::PathBuf::from(base).join("PhoneCam-spike")
+}
+
 /// Local CA with Name Constraints (private ranges + phonecam.local) and a leaf with SAN IPs, <=398 days.
 pub fn make(ips: &[Ipv4Addr]) -> Result<Certs> {
-    let ca_key = KeyPair::generate()?;
+    let dir = ca_store();
+    let (key_path, der_path) = (dir.join("ca-key.pem"), dir.join("ca-cert.der"));
+    let stored = std::fs::read_to_string(&key_path).ok().zip(std::fs::read(&der_path).ok());
+    let ca_key = match &stored {
+        Some((pem, _)) => KeyPair::from_pem(pem)?,
+        None => KeyPair::generate()?,
+    };
     let mut ca = CertificateParams::new(vec![])?;
     ca.distinguished_name.push(DnType::CommonName, "PhoneCam Local CA (spike)");
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -31,7 +44,23 @@ pub fn make(ips: &[Ipv4Addr]) -> Result<Certs> {
         ],
         excluded_subtrees: vec![],
     });
-    let ca_cert = ca.self_signed(&ca_key)?;
+    let ca_der = match stored {
+        Some((_, der)) => der,
+        None => {
+            let der = ca.self_signed(&ca_key)?.der().to_vec();
+            std::fs::create_dir_all(&dir)?;
+            std::fs::write(&key_path, ca_key.serialize_pem())?;
+            std::fs::write(&der_path, &der)?;
+            println!("[cert] new CA saved to {}", dir.display());
+            der
+        }
+    };
+    let ca_pem = {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&ca_der);
+        let lines: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).unwrap()).collect();
+        format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n", lines.join("\n"))
+    };
     let issuer = rcgen::Issuer::new(ca.clone(), &ca_key);
 
     let leaf_key = KeyPair::generate()?;
@@ -46,9 +75,9 @@ pub fn make(ips: &[Ipv4Addr]) -> Result<Certs> {
     let leaf_cert = leaf.signed_by(&leaf_key, &issuer)?;
 
     Ok(Certs {
-        ca_der: ca_cert.der().to_vec(),
-        ca_pem: ca_cert.pem(),
-        leaf_chain_pem: format!("{}{}", leaf_cert.pem(), ca_cert.pem()),
+        leaf_chain_pem: format!("{}{}", leaf_cert.pem(), ca_pem),
+        ca_der,
+        ca_pem,
         leaf_key_pem: leaf_key.serialize_pem(),
     })
 }
