@@ -72,3 +72,18 @@ Works as an ICE-lite H.264 receiver on first attempt: connect < 100 ms, correct 
 - CPU decode target (< 10%) is very conservative: measured ~1.1% of 12 threads. Tighten to < 5%.
 - CUDA row: state ~135 MB, opt-in only, as already described.
 - Add a note that on loss the receiver depends on PLI unless NACK/RTX is enabled.
+
+## Real iPhone run in relay mode (2026-10-30)
+iPhone on iOS 18.7, Safari 27 → Cloudflare relay (signaling) → spike-rx `--relay`, page served from Vercel. No local CA was needed.
+- **Checkpoint 1 on Safari: PASS.** ICE completed in 268 ms and DTLS finished at 278 ms. The nominated pair is host↔host over Wi-Fi (192.168.15.54 ↔ 192.168.15.145), RTT 4–8 ms. Safari offers H.264 in profiles 640c1f and 42e01f.
+- **Checkpoint 2 on Safari: PASS.** The keyframe arrived 219 ms after the PLI.
+- **Decode:** Auto picked `d3d11va` on adapter 0 (RTX 5060 Ti). FIRST FRAME 1920x1080 hw_surface=1, AU→frame 436 ms on the first frame. softcam was created at 1920x1080.
+- **Steady state:** 1920x1080 at 30–31 fps with nack=0.
+- **Checkpoint 6: PARTIAL** (front camera only). `getCapabilities()` reports:
+  - `zoom` 1–10 (**supported**)
+  - frameRate up to 60
+  - width/height up to 4032x3024
+  - whiteBalanceMode manual/continuous, focusDistance min 0.2
+  - **No `torch`** on the front camera, which is expected. Still to do: the rear camera (torch, lens list) and pressing the zoom/torch buttons.
+- **Checkpoint 7: superseded.** Relay mode with the page on Vercel removes the local CA requirement for phase 1.
+- **Checkpoint 5:** still pending (Wi-Fi → USB).
