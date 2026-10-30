@@ -4,3 +4,5 @@ spike/metrics.csv
 node_modules/
 spike/*.log
 spike/*.csv
+spike/*.log
+spike/*.csv
