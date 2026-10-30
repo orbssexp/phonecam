@@ -2,264 +2,1046 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>PhoneCam spike sender</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>PhoneCam</title>
 <style>
-  body{font:14px -apple-system,system-ui,sans-serif;margin:0;padding:12px;background:#111;color:#eee}
-  button,select{font-size:16px;padding:10px 14px;margin:4px 4px 4px 0;border-radius:8px;border:1px solid #444;background:#222;color:#eee}
-  button.big{background:#0a84ff;border:0;font-size:20px;padding:14px 24px}
-  video{width:100%;max-height:35vh;background:#000;border-radius:8px}
-  pre{white-space:pre-wrap;word-break:break-all;background:#000;padding:8px;border-radius:8px;font-size:12px;max-height:30vh;overflow:auto}
-  h3{margin:10px 0 4px}
+  :root {
+    --bg-color: #000000;
+    --card-bg: rgba(28, 28, 30, 0.94);
+    --btn-bg: #2c2c2e;
+    --btn-hover: #3a3a3c;
+    --btn-active: #0a84ff;
+    --text-primary: #ffffff;
+    --text-secondary: #8e8e93;
+    --border-color: rgba(255, 255, 255, 0.14);
+    --system-blue: #0a84ff;
+    --system-red: #ff453a;
+    --system-green: #30d158;
+    --system-orange: #ff9f0a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+    margin: 0;
+    padding: env(safe-area-inset-top, 12px) env(safe-area-inset-right, 12px) env(safe-area-inset-bottom, 16px) env(safe-area-inset-left, 12px);
+    background: var(--bg-color);
+    color: var(--text-primary);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    overflow-x: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  /* Header */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 4px 12px;
+    gap: 8px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h1 {
+    font-size: 19px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.4px;
+  }
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: var(--btn-bg);
+    border: 1px solid var(--border-color);
+  }
+  .status-idle { color: var(--text-secondary); }
+  .status-connecting { color: var(--system-orange); }
+  .status-live { color: var(--system-green); }
+  .status-reconnecting { color: var(--system-orange); }
+  .status-error { color: var(--system-red); }
+  .status-stopped { color: var(--text-secondary); }
+
+  /* Video Preview */
+  .preview-container {
+    position: relative;
+    width: 100%;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 220px;
+    max-height: 48vh;
+    background: #050505;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    touch-action: none;
+  }
+  video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000000;
+  }
+  .zoom-overlay {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+
+  /* Bottom Controls Panel */
+  .controls-panel {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    padding: 14px;
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    backdrop-filter: blur(25px);
+    -webkit-backdrop-filter: blur(25px);
+  }
+  .control-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .control-row.spread {
+    justify-content: space-between;
+  }
+  .control-row.center {
+    justify-content: center;
+  }
+
+  /* Buttons & Selects conforming to 44pt Apple HIG */
+  button, select {
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 500;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 10px 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--btn-bg);
+    color: var(--text-primary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.08s ease, border-color 0.15s ease;
+    touch-action: manipulation;
+  }
+  button:active, select:active {
+    transform: scale(0.97);
+    background: var(--btn-hover);
+  }
+  button:disabled, select:disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+  button.active, button[aria-pressed="true"] {
+    background: var(--system-blue);
+    border-color: var(--system-blue);
+    color: #ffffff;
+  }
+
+  /* Preset Zoom Buttons */
+  .btn-zoom {
+    min-width: 48px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+  /* Primary Action Buttons */
+  .btn-primary {
+    background: var(--system-blue);
+    border: none;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 16px;
+    flex: 1;
+    min-height: 48px;
+  }
+  .btn-primary:active {
+    background: #0071e3;
+  }
+  .btn-destructive {
+    background: var(--system-red);
+    border: none;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 16px;
+    flex: 1;
+    min-height: 48px;
+  }
+  .btn-destructive:active {
+    background: #d70015;
+  }
+  .btn-secondary {
+    flex: 1;
+    min-height: 48px;
+  }
+
+  select {
+    flex: 1;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238e8e93' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14 2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    padding-right: 36px;
+  }
+
+  .btn-details {
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    min-height: 36px;
+  }
+
+  /* Details Panel */
+  #detailsPanel {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 14px;
+    margin-top: 10px;
+    margin-bottom: 8px;
+    display: none;
+    max-height: 40vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #detailsPanel h3 {
+    margin: 8px 0 4px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  pre {
+    white-space: pre-wrap;
+    word-break: break-all;
+    background: #000000;
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    border: 1px solid var(--border-color);
+    color: #a1a1a6;
+    margin: 4px 0 10px;
+    max-height: 140px;
+    overflow-y: auto;
+  }
+
+  /* Blackout screen */
+  #blackout {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #000000;
+    z-index: 99999;
+    cursor: pointer;
+    touch-action: none;
+    display: none;
+  }
 </style>
 </head>
 <body>
-<button id="start" class="big">Start</button>
-<button id="restart">ICE restart</button>
-<button id="stop">Stop</button>
-<div>
-  <select id="lens"></select>
-  <select id="res">
-    <option value="1920x1080@30">1080p30</option>
-    <option value="1280x720@30">720p30</option>
-    <option value="1920x1080@60">1080p60</option>
-    <option value="3840x2160@30">4K30</option>
-    <option value="640x480@30">480p30</option>
-  </select>
-</div>
-<div>
-  <button id="zoomUp">zoom +</button><button id="zoomDn">zoom -</button><button id="torch">torch toggle</button><button id="mirror">mirror preview</button>
-</div>
-<video id="v" playsinline muted autoplay></video>
-<h3>Track capabilities</h3><pre id="caps">-</pre>
-<h3>Applied settings / stats</h3><pre id="stats">-</pre>
-<h3>Log</h3><pre id="log"></pre>
+  <div id="blackout" aria-hidden="true"></div>
+
+  <header>
+    <div class="brand">
+      <h1>PhoneCam</h1>
+      <div id="connStatus" class="status-pill status-idle">○ Ready to connect</div>
+    </div>
+    <button id="toggleDetails" class="btn-details" type="button" aria-expanded="false">ℹ️ Show details</button>
+  </header>
+
+  <div class="preview-container" id="previewBox">
+    <video id="v" playsinline muted autoplay></video>
+    <div id="zoomBadge" class="zoom-overlay">1.0×</div>
+  </div>
+
+  <div class="controls-panel">
+    <!-- Row 1: Zoom presets, torch toggle (if supported), mirror toggle -->
+    <div class="control-row spread">
+      <div class="control-row">
+        <button id="zoom05" class="btn-zoom" type="button">0.5×</button>
+        <button id="zoom1" class="btn-zoom active" type="button">1×</button>
+        <button id="zoom2" class="btn-zoom" type="button">2×</button>
+      </div>
+      <div class="control-row">
+        <button id="torch" type="button" style="display:none;" aria-pressed="false">🔦 Flashlight: Off</button>
+        <button id="mirror" type="button" aria-pressed="false">🪞 Mirror: Off</button>
+      </div>
+    </div>
+
+    <!-- Row 2: Camera and resolution selection -->
+    <div class="control-row">
+      <select id="lens" aria-label="Camera lens"></select>
+      <select id="res" aria-label="Resolution and frame rate">
+        <option value="1920x1080@30">1080p30</option>
+        <option value="1280x720@30">720p30</option>
+        <option value="1920x1080@60">1080p60</option>
+        <option value="3840x2160@30">4K30</option>
+        <option value="640x480@30">480p30</option>
+      </select>
+    </div>
+
+    <!-- Row 3: Main Actions -->
+    <div class="control-row">
+      <button id="start" class="btn-primary" type="button">▶ Start camera</button>
+      <button id="stop" class="btn-destructive" type="button" style="display:none;">⏹ Stop camera</button>
+      <button id="restart" class="btn-secondary" type="button">🔄 Restart connection</button>
+    </div>
+  </div>
+
+  <!-- Collapsible Details Panel -->
+  <div id="detailsPanel">
+    <h3>Track capabilities</h3>
+    <pre id="caps">-</pre>
+    <h3>Applied settings / stats</h3>
+    <pre id="stats">-</pre>
+    <h3>Log</h3>
+    <pre id="log"></pre>
+  </div>
+
 <script>
 (function(){
 'use strict';
-var $ = function(id){return document.getElementById(id);};
-var ws=null, pc=null, track=null, stream=null, ctl=null, sender=null, torchOn=false, statsTimer=null, wsOpenQ=[];
+
+var $ = function(id){ return document.getElementById(id); };
+var ws = null, pc = null, track = null, stream = null, ctl = null, sender = null;
+var torchOn = false, statsTimer = null, wsOpenQ = [];
 var params = new URLSearchParams(location.search);
-var frag = new URLSearchParams(location.hash.replace(/^#/,''));
+var frag = new URLSearchParams(location.hash.replace(/^#/, ''));
 var RELAY = frag.get('relay'), ROOM = frag.get('room'), relayMode = !!(RELAY && ROOM);
+var K = frag.get('k') || params.get('k') || '';
 var peerUp = false, peerWaiters = [];
+var isStreaming = false;
+var hasUserSelectedLens = false;
+var currentZoom = 1;
+var idleTimer = null;
+var detailsVisible = false;
 
 function log(m){
-  var line=(performance.now()/1000).toFixed(2)+' '+m;
-  $('log').textContent += line+'\n';
-  $('log').scrollTop = 1e9;
-  try{ if(ws && ws.readyState===1) ws.send(JSON.stringify({type:'log',msg:m})); }catch(e){}
+  var line = (performance.now() / 1000).toFixed(2) + ' ' + m;
+  var logEl = $('log');
+  if (logEl) {
+    logEl.textContent += line + '\n';
+    logEl.scrollTop = 1e9;
+  }
+  try {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'log', msg: m }));
+  } catch(e) {}
 }
-window.onerror=function(m){log('ERR '+m);};
+window.onerror = function(m){
+  log('ERR ' + m);
+  setStatus('error', 'Error');
+};
+
+function setStatus(state, label){
+  var el = $('connStatus');
+  if (!el) return;
+  var icons = {
+    idle: '○',
+    connecting: '◌',
+    live: '●',
+    reconnecting: '🔄',
+    stopped: '■',
+    error: '⚠️'
+  };
+  var icon = icons[state] || '○';
+  el.className = 'status-pill status-' + state;
+  el.textContent = icon + ' ' + label;
+}
+
+// Pairing proof: HMAC-SHA256(key=k bytes, msg='phonecam-pair-v1'+nonce) as lowercase hex
+async function computeProof(secret, nonce){
+  var enc = new TextEncoder();
+  var key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  var msg = enc.encode('phonecam-pair-v1' + nonce);
+  var sig = await crypto.subtle.sign('HMAC', key, msg);
+  var bytes = new Uint8Array(sig);
+  var hex = '';
+  for (var i = 0; i < bytes.length; i++) {
+    var b = bytes[i].toString(16);
+    hex += (b.length < 2 ? '0' + b : b);
+  }
+  return hex;
+}
 
 function openWs(){
-  return new Promise(function(res,rej){
-    var url = relayMode ? RELAY.replace(/[/]+$/,'')+'/room/'+encodeURIComponent(ROOM)+'?role=phone'
-                        : (location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';
-    ws=new WebSocket(url);
-    ws.onopen=function(){log('ws open '+(relayMode?'(relay)':url));res();};
-    ws.onerror=function(){rej(new Error('ws error'));};
-    ws.onclose=function(){log('ws closed');};
-    ws.onmessage=function(ev){
-      var m=JSON.parse(ev.data);
-      if(m.t==='peer'){
-        log('relay peer up='+m.up);
-        var was=peerUp; peerUp=m.up;
-        if(m.up){ var w=peerWaiters; peerWaiters=[]; w.forEach(function(f){f();}); }
-        if(m.up && !was && pc && pc.connectionState!=='connected'){ iceRestart(); }
+  return new Promise(function(res, rej){
+    var url = relayMode
+      ? RELAY.replace(/[/]+$/, '') + '/room/' + encodeURIComponent(ROOM) + '?role=phone'
+      : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    ws = new WebSocket(url);
+    ws.onopen = function(){
+      log('ws open ' + (relayMode ? '(relay)' : url));
+      res();
+    };
+    ws.onerror = function(e){
+      log('ws error');
+      setStatus('error', 'Disconnected');
+      rej(new Error('ws error'));
+    };
+    ws.onclose = function(){
+      log('ws closed');
+      if (isStreaming) setStatus('error', 'Disconnected');
+    };
+    ws.onmessage = async function(ev){
+      try {
+        var m = JSON.parse(ev.data);
+      } catch(e) {
+        log('bad ws message: ' + ev.data);
         return;
       }
-      if(m.type==='answer'){ pc.setRemoteDescription({type:'answer',sdp:m.sdp}).then(function(){log('answer applied');}).catch(function(e){log('answer ERR '+e);}); }
-      else if(m.type==='hello'){ log('hello addrs='+JSON.stringify(m.addresses)); }
-      else if(m.type==='restart_ice'){ log('server asked restart_ice'); iceRestart(); }
-      else if(m.type==='error'){ log('server error '+m.msg); }
+      if (m.t === 'peer') {
+        log('relay peer up=' + m.up);
+        var was = peerUp;
+        peerUp = m.up;
+        if (m.up) {
+          var w = peerWaiters;
+          peerWaiters = [];
+          w.forEach(function(f){ f(); });
+          if (pc && pc.connectionState === 'connected') {
+            setStatus('live', 'Live');
+          }
+        } else {
+          if (isStreaming) setStatus('connecting', 'Waiting for desktop…');
+        }
+        if (m.up && !was && pc && pc.connectionState !== 'connected') {
+          iceRestart();
+        }
+        return;
+      }
+      if (m.type === 'challenge') {
+        log('received challenge nonce=' + m.nonce);
+        try {
+          var proof = await computeProof(K, m.nonce);
+          var reply = {
+            type: 'hello',
+            token: null,
+            role: 'phone',
+            version: 1,
+            proof: proof
+          };
+          if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify(reply));
+            log('sent hello proof');
+          }
+        } catch(err) {
+          log('proof computation failed: ' + err);
+        }
+        return;
+      }
+      if (m.type === 'answer') {
+        pc.setRemoteDescription({ type: 'answer', sdp: m.sdp })
+          .then(function(){
+            log('answer applied');
+            setStatus('live', 'Live');
+          })
+          .catch(function(e){
+            log('answer ERR ' + e);
+          });
+      } else if (m.type === 'hello') {
+        log('hello addrs=' + JSON.stringify(m.addresses));
+      } else if (m.type === 'restart_ice') {
+        log('server asked restart_ice');
+        iceRestart();
+      } else if (m.type === 'error') {
+        log('server error ' + m.msg);
+      }
     };
   });
 }
 
 async function listLenses(){
-  try{
-    var devs=await navigator.mediaDevices.enumerateDevices();
-    var cams=devs.filter(function(d){return d.kind==='videoinput';});
-    var sel=$('lens'), keep=(track && track.getSettings().deviceId) || sel.value; sel.innerHTML='';
-    cams.forEach(function(d,i){var o=document.createElement('option');o.value=d.deviceId;o.textContent=(d.label||('camera '+i));sel.appendChild(o);});
-    if(keep && cams.some(function(d){return d.deviceId===keep;})) sel.value=keep;
-    log('lenses: '+JSON.stringify(cams.map(function(d){return d.label;})));
-  }catch(e){log('enumerateDevices ERR '+e);}
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    var devs = await navigator.mediaDevices.enumerateDevices();
+    var cams = devs.filter(function(d){ return d.kind === 'videoinput'; });
+    var sel = $('lens');
+    var prevVal = sel.value;
+    sel.innerHTML = '';
+
+    cams.forEach(function(d, i){
+      var opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || ('Camera ' + (i + 1));
+      sel.appendChild(opt);
+    });
+
+    // Default lens: "Back Dual Wide Camera" if present
+    var dualWide = cams.find(function(c){
+      return /dual\s*wide/i.test(c.label);
+    });
+
+    if (!hasUserSelectedLens && dualWide) {
+      sel.value = dualWide.deviceId;
+    } else if (prevVal && cams.some(function(d){ return d.deviceId === prevVal; })) {
+      sel.value = prevVal;
+    } else if (track && track.getSettings && track.getSettings().deviceId && cams.some(function(d){ return d.deviceId === track.getSettings().deviceId; })) {
+      sel.value = track.getSettings().deviceId;
+    } else if (cams.length > 0) {
+      sel.value = cams[0].deviceId;
+    }
+    log('lenses: ' + JSON.stringify(cams.map(function(d){ return d.label; })));
+  } catch(e) {
+    log('enumerateDevices ERR ' + e);
+  }
 }
 
 function parseRes(){
-  var m=$('res').value.match(/(\d+)x(\d+)@(\d+)/);
-  return {w:+m[1],h:+m[2],f:+m[3]};
+  var m = $('res').value.match(/(\d+)x(\d+)@(\d+)/);
+  return { w: +m[1], h: +m[2], f: +m[3] };
 }
 
 async function getCam(){
-  var r=parseRes();
-  var vc={width:{ideal:r.w},height:{ideal:r.h},frameRate:{ideal:r.f}};
-  if($('lens').value) vc.deviceId={exact:$('lens').value};
-  else vc.facingMode={ideal:'environment'};
-  if(stream){stream.getTracks().forEach(function(t){t.stop();});}
-  stream=await navigator.mediaDevices.getUserMedia({video:vc,audio:false});
-  track=stream.getVideoTracks()[0];
-  $('v').srcObject=stream;
-  var caps = track.getCapabilities ? track.getCapabilities() : {};
-  var st = track.getSettings();
-  $('caps').textContent = JSON.stringify(caps,null,1)+'\nsettings: '+JSON.stringify(st);
-  log('capabilities: '+JSON.stringify(caps));
-  log('settings: '+JSON.stringify(st));
-  track.onended=function(){log('track ended');};
-  track.onmute=function(){log('track muted');};
-  track.onunmute=function(){log('track unmuted');};
+  var r = parseRes();
+  var vc = { width: { ideal: r.w }, height: { ideal: r.h }, frameRate: { ideal: r.f } };
+  if ($('lens').value) {
+    vc.deviceId = { exact: $('lens').value };
+  } else {
+    vc.facingMode = { ideal: 'environment' };
+  }
+
+  if (stream) {
+    stream.getTracks().forEach(function(t){ t.stop(); });
+  }
+
+  stream = await navigator.mediaDevices.getUserMedia({ video: vc, audio: false });
+  track = stream.getVideoTracks()[0];
+  $('v').srcObject = stream;
+
   await listLenses();
+
+  // If default Back Dual Wide Camera exists and wasn't requested initially, switch to it:
+  if (!hasUserSelectedLens && $('lens').value && track.getSettings().deviceId !== $('lens').value) {
+    log('switching to default Back Dual Wide Camera: ' + $('lens').value);
+    stream.getTracks().forEach(function(t){ t.stop(); });
+    vc.deviceId = { exact: $('lens').value };
+    stream = await navigator.mediaDevices.getUserMedia({ video: vc, audio: false });
+    track = stream.getVideoTracks()[0];
+    $('v').srcObject = stream;
+  }
+
+  updateTrackDiagnostics();
+  updateTorchSupport();
+  updateZoomSupport();
+
+  track.onended = function(){ log('track ended'); };
+  track.onmute = function(){ log('track muted'); };
+  track.onunmute = function(){ log('track unmuted'); };
+}
+
+function updateTrackDiagnostics(){
+  if (!track) return;
+  var caps = track.getCapabilities ? track.getCapabilities() : {};
+  var st = track.getSettings ? track.getSettings() : {};
+  $('caps').textContent = JSON.stringify(caps, null, 2) + '\nsettings: ' + JSON.stringify(st, null, 2);
+  log('capabilities: ' + JSON.stringify(caps));
+  log('settings: ' + JSON.stringify(st));
+}
+
+function updateTorchSupport(){
+  var caps = (track && track.getCapabilities) ? track.getCapabilities() : {};
+  var btn = $('torch');
+  if (caps.torch) {
+    btn.style.display = 'inline-flex';
+    btn.disabled = false;
+  } else {
+    btn.style.display = 'none';
+    btn.disabled = true;
+    torchOn = false;
+  }
+  updateTorchBtn();
+}
+
+function updateTorchBtn(){
+  $('torch').innerHTML = torchOn ? '🔦 Flashlight: On' : '🔦 Flashlight: Off';
+  $('torch').setAttribute('aria-pressed', torchOn ? 'true' : 'false');
+  $('torch').classList.toggle('active', torchOn);
+}
+
+function updateZoomSupport(){
+  var caps = (track && track.getCapabilities) ? track.getCapabilities() : {};
+  if (caps.zoom) {
+    var min = caps.zoom.min !== undefined ? caps.zoom.min : 1;
+    var max = caps.zoom.max !== undefined ? caps.zoom.max : 10;
+    $('zoom05').disabled = (min > 0.5);
+    $('zoom1').disabled = (min > 1 || max < 1);
+    $('zoom2').disabled = (max < 2);
+  }
+  updateZoomUI(currentZoom);
+}
+
+function updateZoomUI(z){
+  var formatted = (Math.round(z * 10) / 10).toFixed(1) + '×';
+  $('zoomBadge').textContent = formatted;
+  $('zoom05').classList.toggle('active', Math.abs(z - 0.5) < 0.1);
+  $('zoom1').classList.toggle('active', Math.abs(z - 1.0) < 0.1);
+  $('zoom2').classList.toggle('active', Math.abs(z - 2.0) < 0.1);
+}
+
+async function applyZoom(z){
+  if (!track) return;
+  var caps = track.getCapabilities ? track.getCapabilities() : {};
+  var min = (caps.zoom && caps.zoom.min !== undefined) ? caps.zoom.min : 0.5;
+  var max = (caps.zoom && caps.zoom.max !== undefined) ? caps.zoom.max : 10;
+  var target = Math.max(min, Math.min(max, z));
+  target = Math.round(target * 10) / 10;
+  currentZoom = target;
+  updateZoomUI(target);
+  await applyC({ zoom: target });
 }
 
 function h264Only(tc){
-  var caps=RTCRtpSender.getCapabilities('video').codecs.filter(function(c){return c.mimeType.toLowerCase()==='video/h264';});
-  // prefer packetization-mode=1
-  caps.sort(function(a,b){
-    var am=(a.sdpFmtpLine||'').indexOf('packetization-mode=1')>=0?0:1;
-    var bm=(b.sdpFmtpLine||'').indexOf('packetization-mode=1')>=0?0:1;
-    return am-bm;
+  var caps = RTCRtpSender.getCapabilities('video').codecs.filter(function(c){
+    return c.mimeType.toLowerCase() === 'video/h264';
   });
-  log('H264 codecs offered: '+caps.map(function(c){return c.sdpFmtpLine;}).join(' | '));
+  caps.sort(function(a, b){
+    var am = (a.sdpFmtpLine || '').indexOf('packetization-mode=1') >= 0 ? 0 : 1;
+    var bm = (b.sdpFmtpLine || '').indexOf('packetization-mode=1') >= 0 ? 0 : 1;
+    return am - bm;
+  });
+  log('H264 codecs offered: ' + caps.map(function(c){ return c.sdpFmtpLine; }).join(' | '));
   tc.setCodecPreferences(caps);
 }
 
 function waitIce(pc){
   return new Promise(function(res){
-    if(pc.iceGatheringState==='complete'){res();return;}
-    var done=false;
-    function fin(){ if(!done){done=true;res();} }
-    pc.addEventListener('icegatheringstatechange',function(){ if(pc.iceGatheringState==='complete') fin(); });
-    setTimeout(fin,2500);
+    if (pc.iceGatheringState === 'complete') { res(); return; }
+    var done = false;
+    function fin(){ if (!done) { done = true; res(); } }
+    pc.addEventListener('icegatheringstatechange', function(){
+      if (pc.iceGatheringState === 'complete') fin();
+    });
+    setTimeout(fin, 2500);
   });
 }
 
 async function sendOffer(opts){
-  var offer=await pc.createOffer(opts||{});
+  var offer = await pc.createOffer(opts || {});
   await pc.setLocalDescription(offer);
   await waitIce(pc);
-  var sdp=pc.localDescription.sdp;
-  var cands=sdp.split('\n').filter(function(l){return l.indexOf('a=candidate')===0;});
-  log('offer candidates ('+cands.length+'): '+cands.join(' || '));
-  ws.send(JSON.stringify({type:'offer',sdp:sdp}));
-}
-
-async function start(){
-  try{
-    $('start').disabled=true;
-    await getCam();
-    await openWs();
-    if(relayMode && !peerUp){
-      log('waiting for desktop on relay...');
-      await new Promise(function(r){ peerWaiters.push(r); setTimeout(r,15000); });
-    }
-    pc=new RTCPeerConnection({iceServers:[],bundlePolicy:'max-bundle'});
-    pc.oniceconnectionstatechange=function(){log('iceConnectionState='+pc.iceConnectionState);};
-    pc.onconnectionstatechange=function(){log('connectionState='+pc.connectionState);};
-    pc.onicecandidateerror=function(e){log('icecandidateerror '+e.errorCode+' '+e.errorText);};
-    ctl=pc.createDataChannel('ctl',{ordered:true});
-    ctl.onopen=function(){
-      log('ctl open');
-      sendCaps();
-    };
-    ctl.onmessage=function(ev){
-      try{var m=JSON.parse(ev.data); if(m.type==='ping'){ctl.send(JSON.stringify({type:'pong',t:m.t}));}}catch(e){}
-      log('ctl msg '+ev.data);
-    };
-    var tc=pc.addTransceiver(track,{direction:'sendonly',streams:[stream]});
-    sender=tc.sender;
-    h264Only(tc);
-    await sendOffer();
-    await applyBitrate();
-    if(statsTimer) clearInterval(statsTimer);
-    statsTimer=setInterval(pollStats,2000);
-  }catch(e){ log('start ERR '+e); $('start').disabled=false; }
+  var sdp = pc.localDescription.sdp;
+  var cands = sdp.split('\n').filter(function(l){ return l.indexOf('a=candidate') === 0; });
+  log('offer candidates (' + cands.length + '): ' + cands.join(' || '));
+  ws.send(JSON.stringify({ type: 'offer', sdp: sdp }));
 }
 
 async function applyBitrate(){
-  try{
-    var p=sender.getParameters(); if(!p.encodings||!p.encodings.length) p.encodings=[{}];
-    p.degradationPreference = "maintain-resolution"; p.encodings[0].maxBitrate = (parseRes().h>=1080?6000000:3000000);
+  if (!sender) return;
+  try {
+    var p = sender.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    p.degradationPreference = 'maintain-resolution';
+    p.encodings[0].maxBitrate = (parseRes().h >= 1080 ? 6000000 : 3000000);
     await sender.setParameters(p);
     log('maxBitrate hint applied');
-  }catch(e){log('setParameters ERR '+e);}
+  } catch(e) {
+    log('setParameters ERR ' + e);
+  }
 }
 
 function sendCaps(){
-  if(ctl && ctl.readyState==='open') ctl.send(JSON.stringify({type:'caps',caps:track.getCapabilities?track.getCapabilities():{},settings:track.getSettings(),ua:navigator.userAgent}));
+  if (ctl && ctl.readyState === 'open' && track) {
+    ctl.send(JSON.stringify({
+      type: 'caps',
+      caps: track.getCapabilities ? track.getCapabilities() : {},
+      settings: track.getSettings ? track.getSettings() : {},
+      ua: navigator.userAgent
+    }));
+  }
 }
 
 // Lens/resolution change while streaming: iOS allows one camera at a time, so getCam()
 // stops the old track first, then the new one is swapped in without renegotiating.
 async function switchCam(){
-  if(!sender){ log('not streaming; choice applies on Start'); return; }
-  try{
+  if (!sender) {
+    log('not streaming; choice applies on Start');
+    return;
+  }
+  try {
     await getCam();
     await sender.replaceTrack(track);
     await applyBitrate();
-    zoom=1; torchOn=false;
+    currentZoom = 1;
+    torchOn = false;
+    updateTorchBtn();
+    updateZoomUI(1);
     sendCaps();
-    log('switched: '+JSON.stringify(track.getSettings()));
-  }catch(e){ log('switch ERR '+e); }
+    log('switched: ' + JSON.stringify(track.getSettings()));
+  } catch(e) {
+    log('switch ERR ' + e);
+  }
 }
 
 async function iceRestart(){
-  if(!pc) return;
+  if (!pc) return;
   log('ICE restart requested');
-  try{ await sendOffer({iceRestart:true}); }catch(e){log('restart ERR '+e);}
+  setStatus('reconnecting', 'Reconnecting…');
+  try {
+    await sendOffer({ iceRestart: true });
+  } catch(e) {
+    log('restart ERR ' + e);
+  }
 }
 
 async function pollStats(){
-  if(!pc) return;
-  try{
-    var rep=await pc.getStats(), out=[], pairId=null;
+  if (!pc) return;
+  try {
+    var rep = await pc.getStats(), out = [], pairId = null;
     rep.forEach(function(s){
-      if(s.type==='outbound-rtp' && s.kind==='video'){
-        out.push('out '+s.frameWidth+'x'+s.frameHeight+' fps='+s.framesPerSecond+' sent='+s.framesSent+' bytes='+s.bytesSent+' keyframes='+s.keyFramesEncoded+' pli='+s.pliCount+' nack='+s.nackCount+' enc='+(s.encoderImplementation||'?')+' limit='+(s.qualityLimitationReason||''));
+      if (s.type === 'outbound-rtp' && s.kind === 'video') {
+        out.push('out ' + s.frameWidth + 'x' + s.frameHeight + ' fps=' + s.framesPerSecond + ' sent=' + s.framesSent + ' bytes=' + s.bytesSent + ' keyframes=' + s.keyFramesEncoded + ' pli=' + s.pliCount + ' nack=' + s.nackCount + ' enc=' + (s.encoderImplementation || '?') + ' limit=' + (s.qualityLimitationReason || ''));
       }
-      if(s.type==='transport' && s.selectedCandidatePairId) pairId=s.selectedCandidatePairId;
+      if (s.type === 'transport' && s.selectedCandidatePairId) pairId = s.selectedCandidatePairId;
     });
-    if(pairId){
-      var p=rep.get(pairId), l=rep.get(p.localCandidateId), r=rep.get(p.remoteCandidateId);
-      out.push('pair local='+(l&&(l.address||l.ip))+':'+(l&&l.port)+' '+(l&&l.candidateType)+' remote='+(r&&(r.address||r.ip))+':'+(r&&r.port)+' rtt='+p.currentRoundTripTime);
+    if (pairId) {
+      var p = rep.get(pairId), l = rep.get(p.localCandidateId), r = rep.get(p.remoteCandidateId);
+      out.push('pair local=' + (l && (l.address || l.ip)) + ':' + (l && l.port) + ' ' + (l && l.candidateType) + ' remote=' + (r && (r.address || r.ip)) + ':' + (r && r.port) + ' rtt=' + p.currentRoundTripTime);
     }
-    var txt=out.join('\n'); $('stats').textContent=txt; log('stats '+txt.replace(/\n/g,' ; '));
-  }catch(e){}
+    var txt = out.join('\n');
+    $('stats').textContent = txt;
+    log('stats ' + txt.replace(/\n/g, ' ; '));
+  } catch(e) {}
 }
 
 async function applyC(c){
-  try{
-    await track.applyConstraints({advanced:[c]});
-    var s=track.getSettings();
-    log('applyConstraints '+JSON.stringify(c)+' OK; settings.zoom='+s.zoom+' torch='+s.torch);
-  }catch(e){ log('applyConstraints '+JSON.stringify(c)+' FAIL '+e); }
+  if (!track) return;
+  try {
+    await track.applyConstraints({ advanced: [c] });
+    var s = track.getSettings ? track.getSettings() : {};
+    log('applyConstraints ' + JSON.stringify(c) + ' OK; zoom=' + s.zoom + ' torch=' + s.torch);
+  } catch(e) {
+    log('applyConstraints ' + JSON.stringify(c) + ' FAIL ' + e);
+  }
 }
-var zoom=1;
-$('zoomUp').onclick=function(){zoom=Math.min(zoom+0.5,10);applyC({zoom:zoom});};
-$('zoomDn').onclick=function(){zoom=Math.max(zoom-0.5,1);applyC({zoom:zoom});};
-$('torch').onclick=function(){torchOn=!torchOn;applyC({torch:torchOn});};
-$('start').onclick=start;
-$('restart').onclick=iceRestart;
-$('stop').onclick=function(){
-  if(statsTimer){clearInterval(statsTimer);statsTimer=null;}
-  if(pc){pc.close();pc=null;} sender=null;
-  if(stream){stream.getTracks().forEach(function(t){t.stop();});}
-  if(ws){ws.onclose=null;ws.close();ws=null;} peerUp=false;  // free the relay slot so Start can rejoin
-  $('start').disabled=false; log('stopped');
-};
-// Preview-only flip: iOS mirrors the front-camera preview itself; the frames sent to the PC are not affected.
-var mirrored=false;
-try{ mirrored = localStorage.getItem('pc-mirror')==='1'; }catch(e){}
-function applyMirror(){ $('v').style.transform = mirrored ? 'scaleX(-1)' : ''; $('mirror').textContent='mirror preview: '+(mirrored?'on':'off'); }
-$('mirror').onclick=function(){ mirrored=!mirrored; try{ localStorage.setItem('pc-mirror', mirrored?'1':'0'); }catch(e){} applyMirror(); log('preview mirror '+mirrored); };
-applyMirror();
-$('lens').onchange=switchCam;
-$('res').onchange=switchCam;
 
-if(params.get('res')){ $('res').value=params.get('res'); }
-if(params.get('auto')==='1'){ setTimeout(start,300); }
-else { navigator.mediaDevices && navigator.mediaDevices.enumerateDevices && listLenses(); }
+async function start(){
+  try {
+    $('start').disabled = true;
+    setStatus('connecting', 'Connecting…');
+    await getCam();
+    await openWs();
+    if (relayMode && !peerUp) {
+      log('waiting for desktop on relay...');
+      setStatus('connecting', 'Waiting for desktop…');
+      await new Promise(function(r){ peerWaiters.push(r); setTimeout(r, 15000); });
+    }
+    pc = new RTCPeerConnection({ iceServers: [], bundlePolicy: 'max-bundle' });
+    pc.oniceconnectionstatechange = function(){
+      log('iceConnectionState=' + pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setStatus('live', 'Live');
+      } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        setStatus('reconnecting', 'Reconnecting…');
+      }
+    };
+    pc.onconnectionstatechange = function(){
+      log('connectionState=' + pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        setStatus('live', 'Live');
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        setStatus('reconnecting', 'Reconnecting…');
+      }
+    };
+    pc.onicecandidateerror = function(e){
+      log('icecandidateerror ' + e.errorCode + ' ' + e.errorText);
+    };
+    ctl = pc.createDataChannel('ctl', { ordered: true });
+    ctl.onopen = function(){
+      log('ctl open');
+      sendCaps();
+    };
+    ctl.onmessage = function(ev){
+      try {
+        var m = JSON.parse(ev.data);
+        if (m.type === 'ping') {
+          var reply = { type: 'pong', t: m.t };
+          if (navigator.getBattery) {
+            navigator.getBattery().then(function(b){
+              reply.battery = b.level;
+              reply.charging = b.charging;
+              ctl.send(JSON.stringify(reply));
+            }).catch(function(){
+              ctl.send(JSON.stringify(reply));
+            });
+          } else {
+            ctl.send(JSON.stringify(reply));
+          }
+        } else if (m.type === 'set') {
+          if (m.zoom !== undefined && m.zoom !== null) applyZoom(m.zoom);
+          if (m.torch !== undefined && m.torch !== null) {
+            torchOn = !!m.torch;
+            applyC({ torch: torchOn });
+            updateTorchBtn();
+          }
+          if (m.lens && m.lens !== $('lens').value) {
+            hasUserSelectedLens = true;
+            $('lens').value = m.lens;
+            switchCam();
+          }
+        }
+      } catch(e) {}
+      log('ctl msg ' + ev.data);
+    };
+
+    var tc = pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+    sender = tc.sender;
+    h264Only(tc);
+    await sendOffer();
+    await applyBitrate();
+
+    if (statsTimer) clearInterval(statsTimer);
+    statsTimer = setInterval(pollStats, 2000);
+
+    isStreaming = true;
+    $('start').style.display = 'none';
+    $('stop').style.display = 'inline-flex';
+    resetIdleTimer();
+  } catch(e) {
+    log('start ERR ' + e);
+    setStatus('error', 'Start failed');
+    $('start').disabled = false;
+    $('start').style.display = 'inline-flex';
+    $('stop').style.display = 'none';
+  }
+}
+
+function stop(){
+  isStreaming = false;
+  if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+  $('blackout').style.display = 'none';
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  if (pc) { pc.close(); pc = null; }
+  sender = null;
+  if (stream) {
+    stream.getTracks().forEach(function(t){ t.stop(); });
+    stream = null;
+    track = null;
+  }
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+  peerUp = false;
+  $('start').disabled = false;
+  $('start').style.display = 'inline-flex';
+  $('stop').style.display = 'none';
+  setStatus('stopped', 'Stopped');
+  log('stopped');
+}
+
+// 0.5x, 1x, 2x zoom buttons
+$('zoom05').onclick = function(){ applyZoom(0.5); };
+$('zoom1').onclick = function(){ applyZoom(1.0); };
+$('zoom2').onclick = function(){ applyZoom(2.0); };
+
+// Torch button
+$('torch').onclick = function(){
+  torchOn = !torchOn;
+  applyC({ torch: torchOn });
+  updateTorchBtn();
+};
+
+// Mirror preview toggle
+var mirrored = false;
+try { mirrored = localStorage.getItem('pc-mirror') === '1'; } catch(e) {}
+function applyMirror(){
+  $('v').style.transform = mirrored ? 'scaleX(-1)' : '';
+  $('mirror').innerHTML = mirrored ? '🪞 Mirror: On' : '🪞 Mirror: Off';
+  $('mirror').setAttribute('aria-pressed', mirrored ? 'true' : 'false');
+  $('mirror').classList.toggle('active', mirrored);
+}
+$('mirror').onclick = function(){
+  mirrored = !mirrored;
+  try { localStorage.setItem('pc-mirror', mirrored ? '1' : '0'); } catch(e) {}
+  applyMirror();
+  log('preview mirror ' + (mirrored ? 'on' : 'off'));
+};
+applyMirror();
+
+// Pinch-to-zoom on preview
+var pinchStartDist = 0;
+var pinchStartZoom = 1;
+var pinchRaf = null;
+var previewBox = $('previewBox');
+
+previewBox.addEventListener('touchstart', function(e){
+  if (e.touches.length === 2) {
+    e.preventDefault();
+    pinchStartDist = Math.hypot(
+      e.touches[0].pageX - e.touches[1].pageX,
+      e.touches[0].pageY - e.touches[1].pageY
+    );
+    pinchStartZoom = currentZoom;
+  }
+}, { passive: false });
+
+previewBox.addEventListener('touchmove', function(e){
+  if (e.touches.length === 2 && pinchStartDist > 0) {
+    e.preventDefault();
+    var dist = Math.hypot(
+      e.touches[0].pageX - e.touches[1].pageX,
+      e.touches[0].pageY - e.touches[1].pageY
+    );
+    var scale = dist / pinchStartDist;
+    var target = pinchStartZoom * scale;
+    if (pinchRaf) cancelAnimationFrame(pinchRaf);
+    pinchRaf = requestAnimationFrame(function(){
+      applyZoom(target);
+    });
+  }
+}, { passive: false });
+
+previewBox.addEventListener('touchend', function(e){
+  if (e.touches.length < 2) {
+    pinchStartDist = 0;
+  }
+});
+
+// Disable page zoom on iOS Safari
+document.addEventListener('gesturestart', function(e){ e.preventDefault(); }, { passive: false });
+document.addEventListener('gesturechange', function(e){ e.preventDefault(); }, { passive: false });
+document.addEventListener('gestureend', function(e){ e.preventDefault(); }, { passive: false });
+document.addEventListener('touchmove', function(e){
+  if (e.touches && e.touches.length > 1) {
+    e.preventDefault();
+  }
+}, { passive: false });
+
+// Black-screen mode: full black overlay after 10 s idle; tap to show controls
+function resetIdleTimer(){
+  if (idleTimer) clearTimeout(idleTimer);
+  if (!isStreaming) {
+    $('blackout').style.display = 'none';
+    return;
+  }
+  idleTimer = setTimeout(function(){
+    if (isStreaming) {
+      $('blackout').style.display = 'block';
+    }
+  }, 10000);
+}
+
+function dismissBlackout(e){
+  if (e) e.stopPropagation();
+  $('blackout').style.display = 'none';
+  resetIdleTimer();
+}
+
+$('blackout').onclick = dismissBlackout;
+$('blackout').ontouchstart = dismissBlackout;
+
+['pointerdown', 'touchstart', 'click', 'keydown'].forEach(function(evt){
+  window.addEventListener(evt, function(){
+    if ($('blackout').style.display === 'block') {
+      dismissBlackout();
+    } else {
+      resetIdleTimer();
+    }
+  }, { passive: true });
+});
+
+// On visibilitychange back to visible: re-acquire camera if needed, replaceTrack, and re-offer on restart_ice
+document.addEventListener('visibilitychange', async function(){
+  if (document.visibilityState === 'hidden') {
+    log('visibility: hidden');
+    if (ctl && ctl.readyState === 'open') {
+      try { ctl.send(JSON.stringify({ type: 'paused', reason: 'background' })); } catch(e) {}
+    }
+  } else if (document.visibilityState === 'visible') {
+    log('visibility: visible');
+    if (isStreaming) {
+      try {
+        log('re-acquiring camera after visibility change');
+        await getCam();
+        if (sender && track) {
+          await sender.replaceTrack(track);
+          log('replaceTrack done');
+          await applyBitrate();
+        }
+        if (ctl && ctl.readyState === 'open') {
+          try {
+            ctl.send(JSON.stringify({ type: 'resumed' }));
+            sendCaps();
+          } catch(e) {}
+        }
+        log('visibility change: sending ICE restart re-offer');
+        await iceRestart();
+      } catch(e) {
+        log('visibility resume ERR: ' + e);
+      }
+    }
+  }
+});
+
+// Details toggle (hidden by default)
+$('toggleDetails').onclick = function(){
+  detailsVisible = !detailsVisible;
+  $('detailsPanel').style.display = detailsVisible ? 'block' : 'none';
+  $('toggleDetails').innerHTML = detailsVisible ? 'ℹ️ Hide details' : 'ℹ️ Show details';
+  $('toggleDetails').setAttribute('aria-expanded', detailsVisible ? 'true' : 'false');
+};
+
+$('lens').onchange = function(){
+  hasUserSelectedLens = true;
+  switchCam();
+};
+$('res').onchange = switchCam;
+
+$('start').onclick = start;
+$('stop').onclick = stop;
+$('restart').onclick = iceRestart;
+
+if (params.get('res')) { $('res').value = params.get('res'); }
+if (params.get('auto') === '1') {
+  setTimeout(start, 300);
+} else {
+  if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+    listLenses();
+  }
+}
+
 })();
 </script>
 </body>
