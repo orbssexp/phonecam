@@ -4,7 +4,7 @@
 param([int]$Secs = 130, [string]$Decoders = "d3d11,cuda,cpu", [string]$Res = "1920x1080@30", [int]$Fps = 30, [string]$Metrics = "metrics.csv", [string]$Y4m = "")
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-$prof0 = "C:\Users\gusta\AppData\Local\Temp\claude\C--Users-gusta-orca-projects-phone-cam\e64ae5e7-ab6b-4942-b752-67d6be556543\scratchpad\edge-spike"
+$prof0 = Join-Path $env:TEMP "phonecam-edge-spike"
 foreach ($d in ($Decoders -split ",")) {
   Write-Host "=== $d ==="
   $log = Join-Path $here "run-$d.log"

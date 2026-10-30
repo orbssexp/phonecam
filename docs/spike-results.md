@@ -45,7 +45,7 @@ Not verified: appearing in DirectShow enumeration for 64-bit and 32-bit hosts. N
 
 **User, in an elevated (Run as administrator) Command Prompt:**
 ```
-cd /d C:\Users\gusta\orca\projects\phone-cam\spike\vendor\softcam-src\src\softcam\dist\bin
+cd /d <repo>\spike\vendor\softcam-src\src\softcam\dist\bin
 C:\Windows\System32\regsvr32.exe x64\softcam.dll
 C:\Windows\SysWOW64\regsvr32.exe Win32\softcam.dll
 ```
