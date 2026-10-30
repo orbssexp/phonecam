@@ -1,0 +1,12 @@
+{
+  "buildCommand": "",
+  "installCommand": "",
+  "outputDirectory": "spike/web",
+  "cleanUrls": true,
+  "headers": [
+    { "source": "/(.*)", "headers": [
+      { "key": "Referrer-Policy", "value": "no-referrer" },
+      { "key": "Cache-Control", "value": "no-cache" }
+    ] }
+  ]
+}
