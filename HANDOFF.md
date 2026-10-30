@@ -21,6 +21,7 @@ Updated: 2026-10-30
   - Update the spec (§13 cert → Vercel page + relay signaling; §10/§11 numbers).
   - Implementation plan (superpowers:writing-plans) for Rounds 1–2. Round 1 must add NACK/RTX and TWCC (bandwidth feedback).
 - In relay mode spike-rx still starts the local HTTPS/CA servers. Harmless, but remove them in the real app.
+- spike-rx recreates the softcam device when the resolution changes (decode.rs). Apps like Zoom lose the camera when that happens. The real app must keep a fixed output size and scale frames into it (spec §7.3).
 
 ## Rules learned
 - Agents NEVER open a visible browser or the user's profile: headless Edge only, with a temp `--user-data-dir`.

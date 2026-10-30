@@ -81,8 +81,9 @@ async function listLenses(){
   try{
     var devs=await navigator.mediaDevices.enumerateDevices();
     var cams=devs.filter(function(d){return d.kind==='videoinput';});
-    var sel=$('lens'); sel.innerHTML='';
+    var sel=$('lens'), keep=(track && track.getSettings().deviceId) || sel.value; sel.innerHTML='';
     cams.forEach(function(d,i){var o=document.createElement('option');o.value=d.deviceId;o.textContent=(d.label||('camera '+i));sel.appendChild(o);});
+    if(keep && cams.some(function(d){return d.deviceId===keep;})) sel.value=keep;
     log('lenses: '+JSON.stringify(cams.map(function(d){return d.label;})));
   }catch(e){log('enumerateDevices ERR '+e);}
 }
@@ -96,6 +97,7 @@ async function getCam(){
   var r=parseRes();
   var vc={width:{ideal:r.w},height:{ideal:r.h},frameRate:{ideal:r.f}};
   if($('lens').value) vc.deviceId={exact:$('lens').value};
+  else vc.facingMode={ideal:'environment'};
   if(stream){stream.getTracks().forEach(function(t){t.stop();});}
   stream=await navigator.mediaDevices.getUserMedia({video:vc,audio:false});
   track=stream.getVideoTracks()[0];
@@ -159,7 +161,7 @@ async function start(){
     ctl=pc.createDataChannel('ctl',{ordered:true});
     ctl.onopen=function(){
       log('ctl open');
-      ctl.send(JSON.stringify({type:'caps',caps:track.getCapabilities?track.getCapabilities():{},settings:track.getSettings(),ua:navigator.userAgent}));
+      sendCaps();
     };
     ctl.onmessage=function(ev){
       try{var m=JSON.parse(ev.data); if(m.type==='ping'){ctl.send(JSON.stringify({type:'pong',t:m.t}));}}catch(e){}
@@ -169,16 +171,37 @@ async function start(){
     sender=tc.sender;
     h264Only(tc);
     await sendOffer();
-    // bitrate hint
-    try{
-      var p=sender.getParameters(); if(!p.encodings||!p.encodings.length) p.encodings=[{}];
-      p.degradationPreference = "maintain-resolution"; p.encodings[0].maxBitrate = (parseRes().h>=1080?6000000:3000000);
-      await sender.setParameters(p);
-      log('maxBitrate hint applied');
-    }catch(e){log('setParameters ERR '+e);}
+    await applyBitrate();
     if(statsTimer) clearInterval(statsTimer);
     statsTimer=setInterval(pollStats,2000);
   }catch(e){ log('start ERR '+e); $('start').disabled=false; }
+}
+
+async function applyBitrate(){
+  try{
+    var p=sender.getParameters(); if(!p.encodings||!p.encodings.length) p.encodings=[{}];
+    p.degradationPreference = "maintain-resolution"; p.encodings[0].maxBitrate = (parseRes().h>=1080?6000000:3000000);
+    await sender.setParameters(p);
+    log('maxBitrate hint applied');
+  }catch(e){log('setParameters ERR '+e);}
+}
+
+function sendCaps(){
+  if(ctl && ctl.readyState==='open') ctl.send(JSON.stringify({type:'caps',caps:track.getCapabilities?track.getCapabilities():{},settings:track.getSettings(),ua:navigator.userAgent}));
+}
+
+// Lens/resolution change while streaming: iOS allows one camera at a time, so getCam()
+// stops the old track first, then the new one is swapped in without renegotiating.
+async function switchCam(){
+  if(!sender){ log('not streaming; choice applies on Start'); return; }
+  try{
+    await getCam();
+    await sender.replaceTrack(track);
+    await applyBitrate();
+    zoom=1; torchOn=false;
+    sendCaps();
+    log('switched: '+JSON.stringify(track.getSettings()));
+  }catch(e){ log('switch ERR '+e); }
 }
 
 async function iceRestart(){
@@ -218,7 +241,15 @@ $('zoomDn').onclick=function(){zoom=Math.max(zoom-0.5,1);applyC({zoom:zoom});};
 $('torch').onclick=function(){torchOn=!torchOn;applyC({torch:torchOn});};
 $('start').onclick=start;
 $('restart').onclick=iceRestart;
-$('stop').onclick=function(){ if(pc){pc.close();pc=null;} if(stream){stream.getTracks().forEach(function(t){t.stop();});} $('start').disabled=false; log('stopped'); };
+$('stop').onclick=function(){
+  if(statsTimer){clearInterval(statsTimer);statsTimer=null;}
+  if(pc){pc.close();pc=null;} sender=null;
+  if(stream){stream.getTracks().forEach(function(t){t.stop();});}
+  if(ws){ws.onclose=null;ws.close();ws=null;} peerUp=false;  // free the relay slot so Start can rejoin
+  $('start').disabled=false; log('stopped');
+};
+$('lens').onchange=switchCam;
+$('res').onchange=switchCam;
 
 if(params.get('res')){ $('res').value=params.get('res'); }
 if(params.get('auto')==='1'){ setTimeout(start,300); }
