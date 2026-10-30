@@ -1,7 +1,7 @@
 {
   "buildCommand": "",
   "installCommand": "",
-  "outputDirectory": "spike/web",
+  "outputDirectory": "apps/web-client",
   "cleanUrls": true,
   "headers": [
     { "source": "/(.*)", "headers": [
