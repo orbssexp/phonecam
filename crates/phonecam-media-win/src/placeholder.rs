@@ -47,8 +47,7 @@ mod tests {
         let has_text = buf
             .as_chunks::<3>()
             .0
-            .iter()
-            .any(|&p| p == [PLACEHOLDER_TEXT_COLOR.0, PLACEHOLDER_TEXT_COLOR.1, PLACEHOLDER_TEXT_COLOR.2]);
+            .contains(&[PLACEHOLDER_TEXT_COLOR.0, PLACEHOLDER_TEXT_COLOR.1, PLACEHOLDER_TEXT_COLOR.2]);
         assert!(has_text);
     }
 }

@@ -243,7 +243,7 @@ mod tests {
         // Outside rectangle must remain 0 (black bar)
         assert_eq!(target[0..3], [0, 0, 0]); // (0,0)
         // Inside rectangle at (1,1) should be red
-        let idx_1_1 = (1 * 4 + 1) * 3;
+        let idx_1_1 = (4 + 1) * 3;
         assert_eq!(target[idx_1_1..idx_1_1 + 3], [0, 0, 255]);
     }
 }
