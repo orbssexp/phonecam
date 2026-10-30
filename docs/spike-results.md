@@ -100,3 +100,15 @@ Same setup (iOS 18.7, relay mode, page with live switching through `replaceTrack
 - **Checkpoint 5 (Wi-Fi → USB): NOT OBSERVED.** There was one nominated pair (Wi-Fi) for the whole session, with no ICE restart, no new pair and no interruption in ingress. Needs a dedicated re-run.
 - **Interruption:** the page logged `track muted` near the end and stopped reporting stats, but ingress packets and keyframes kept arriving at the same rate. Needs a dedicated re-run with notes on what was done (call vs. lock vs. app switch).
 - **RAM:** the process showed about 226 MB working set after 4K decode plus three softcam re-creations, against 45 MB at 1080p in the earlier measurement. Re-measure at fixed 1080p and fixed 4K.
+
+## Real iPhone run #2, continued: Wi-Fi off (2026-10-30)
+- This is the same session as above, still running. After lock and app switch, ingress continued at the full rate for about 3 min, with GAP→PLI recoveries every 20–60 s.
+- When Wi-Fi was turned off on the iPhone, ICE went `Disconnected` at +275 s and **never recovered**; ingress stayed frozen at 147822 packets.
+- **Checkpoint 5: FAIL in the spike, as expected.** Why:
+  - (a) The PC is on **Ethernet** (192.168.15.145), and spike-rx bound UDP only to interfaces present at startup. No USB-hotspot interface existed then, because the cable and hotspot were not connected before the run.
+  - (b) The spike has no automatic failover: no heartbeat-driven `restart_ice` and no re-gathering of interfaces. Only the manual "ICE restart" button exists.
+  - (c) After lock and app switch, the page stopped relaying its logs, so it could not have driven a restart anyway.
+- **Round 1 requirements confirmed:**
+  - Watch for network interfaces appearing or disappearing at runtime (the Apple Mobile Device Ethernet adapter shows up when USB hotspot starts) and bind new sockets.
+  - Heartbeat → `restart_ice` (spec §7.1, §7.2).
+  - The page must re-establish its relay WebSocket and re-offer after a background or network change.
