@@ -7,7 +7,7 @@ Use your iPhone as a Windows webcam. It's a lightweight, open-source alternative
 - **Low RAM/CPU.** A Rust core with a choice of decoder (Auto / NVIDIA / D3D11 / CPU), and a UI that unloads completely when the app is minimized to the tray.
 - **Real camera control.** Lens, resolution/FPS, pinch-to-zoom, torch, mirror and rotation.
 
-> **Status:** early development. Round 0 (technical spike) is done on the `spike/round-0` branch. See [`docs/spike-results.md`](docs/spike-results.md).
+> **Status:** early development. Round 0 (technical spike) is done; its throwaway code lives in [`spike/`](spike/). See [`docs/spike-results.md`](docs/spike-results.md).
 
 ## How it works
 
