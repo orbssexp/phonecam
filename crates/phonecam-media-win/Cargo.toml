@@ -1,0 +1,15 @@
+[package]
+name = "phonecam-media-win"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "PhoneCam Windows media engine: hardware decode, softcam, and letterboxing"
+
+[dependencies]
+phonecam-core = { path = "../phonecam-core" }
+jpeg-encoder = "0.6"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+
+[build-dependencies]
+cc = "1"
