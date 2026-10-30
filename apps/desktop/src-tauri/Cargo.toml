@@ -1,0 +1,31 @@
+[package]
+name = "phonecam-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "PhoneCam desktop app (Tauri 2): tray, pairing QR, transport + virtual camera"
+
+[lib]
+name = "phonecam_desktop_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "phonecam"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+phonecam-core = { path = "../../../crates/phonecam-core" }
+phonecam-transport = { path = "../../../crates/phonecam-transport" }
+phonecam-media-win = { path = "../../../crates/phonecam-media-win" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+qrcode = "0.14"
+base64 = "0.22"
+getrandom = "0.2"
+tracing = "0.1"

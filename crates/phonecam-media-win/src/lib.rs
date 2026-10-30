@@ -402,6 +402,7 @@ fn update_latest_frame(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_media_loop(
     rx: Receiver<MediaMsg>,
     decoder_pref: DecoderPref,
