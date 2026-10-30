@@ -2,3 +2,4 @@
 //! and act on returned values, so Windows (tokio) and iOS (Swift/GCD) share it.
 pub mod controls;
 pub mod protocol;
+pub mod backoff;
