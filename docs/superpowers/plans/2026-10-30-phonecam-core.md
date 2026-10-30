@@ -206,6 +206,12 @@ mod tests {
     }
 
     #[test]
+    fn challenge_carries_the_desktop_nonce() {
+        let c = Signal::Challenge { nonce: "n1".into() };
+        assert_eq!(serde_json::to_string(&c).unwrap(), r#"{"type":"challenge","nonce":"n1"}"#);
+    }
+
+    #[test]
     fn offer_matches_what_the_spike_page_sends() {
         let m: Signal = serde_json::from_str(r#"{"type":"offer","sdp":"v=0"}"#).unwrap();
         assert_eq!(m, Signal::Offer { sdp: "v=0".into() });
@@ -259,6 +265,9 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Signal {
+    /// Desktop → phone when the phone joins: the nonce the phone must prove with (§14a).
+    Challenge { nonce: String },
+    /// Phone → desktop: `proof` = `pairing::proof_hex(k, nonce)`.
     Hello { token: Option<String>, role: Role, version: u32, proof: String },
     Offer { sdp: String },
     Answer { sdp: String },
@@ -299,10 +308,12 @@ pub enum Ctl {
 
 Note: `Set` deserializes missing fields as `None` because they're `Option`.
 
+**Deferred to the transport plan, on purpose:** the SDP signature (`sig` on `Offer`/`Answer`, spec §14a), `camState` on `Pong`, the `state{}` echo, and `set{res,fps}`. Those fields get added together with the code that produces and consumes them.
+
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p phonecam-core protocol`
-Expected: `6 passed`.
+Expected: `7 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -421,12 +432,12 @@ mod tests {
     }
 
     #[test]
-    fn three_unanswered_pings_means_lost() {
+    fn lost_after_6s_without_pong() {
+        // Spec §7.2: "3 missed pongs (6 s)". Pings at 2 s and 4 s go unanswered; at 6 s, Lost.
         let mut h = Heartbeat::new(2_000, 3, 0);
-        h.tick(2_000);
-        h.tick(4_000);
-        h.tick(6_000);
-        assert_eq!(h.tick(8_000), Some(HbAction::Lost));
+        assert_eq!(h.tick(2_000), Some(HbAction::SendPing { t: 2_000 }));
+        assert_eq!(h.tick(4_000), Some(HbAction::SendPing { t: 4_000 }));
+        assert_eq!(h.tick(6_000), Some(HbAction::Lost));
     }
 
     #[test]
@@ -436,9 +447,9 @@ mod tests {
         h.tick(4_000);
         h.pong(4_000, 4_007);
         assert_eq!(h.rtt_ms(), Some(7));
-        h.tick(6_000);
-        h.tick(8_000);
-        assert_eq!(h.tick(10_000), Some(HbAction::SendPing { t: 10_000 }));
+        assert_eq!(h.tick(6_000), Some(HbAction::SendPing { t: 6_000 }));
+        assert_eq!(h.tick(8_000), Some(HbAction::SendPing { t: 8_000 }));
+        assert_eq!(h.tick(10_000), Some(HbAction::Lost));
     }
 
     #[test]
@@ -446,7 +457,6 @@ mod tests {
         let mut h = Heartbeat::new(2_000, 3, 0);
         h.tick(2_000);
         h.tick(4_000);
-        h.tick(6_000);
         h.reset(10_000);
         assert_eq!(h.tick(11_000), None);
         assert_eq!(h.tick(12_000), Some(HbAction::SendPing { t: 12_000 }));
@@ -465,7 +475,8 @@ Expected: FAIL to compile.
 /// What the caller should do after a tick. Spec §7.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HbAction {
-    /// Send `Ctl::Ping { t }` on the DataChannel.
+    /// Send `Ctl::Ping { t }` on the DataChannel. (`pong` doesn't match `t` against
+    /// outstanding pings: any pong proves the link is alive, which is all we need.)
     SendPing { t: u64 },
     /// `miss_limit` pings went unanswered. Repeats every interval until `pong`/`reset`.
     Lost,
@@ -490,7 +501,8 @@ impl Heartbeat {
             return None;
         }
         self.next_ping_at = now_ms + self.interval_ms;
-        if self.outstanding >= self.miss_limit {
+        // With interval 2 s and limit 3, this fires 6 s after the last pong (spec §7.2).
+        if self.outstanding + 1 >= self.miss_limit {
             return Some(HbAction::Lost);
         }
         self.outstanding += 1;
@@ -527,7 +539,7 @@ git commit -m "feat(core): heartbeat with miss detection and rtt"
 
 ### Task 6: Path classification
 
-The desktop may be on Ethernet or Wi-Fi; both reach the phone over the LAN. Round 0 showed the user's PC is on Ethernet, so the classes are **Lan** (preferred) and **UsbHotspot** (fallback), not Wi-Fi vs USB.
+**Naming note:** spec §7.1 says "Wi-Fi > USB". This plan uses `Lan > UsbHotspot` for the same rule, and the spec has been updated to match. The desktop may be on Ethernet or Wi-Fi; both reach the phone over the LAN. Round 0 showed the user's PC is on Ethernet, so the classes are **Lan** (preferred) and **UsbHotspot** (fallback), not Wi-Fi vs USB.
 
 **Files:**
 - Create: `crates/phonecam-core/src/path.rs`
@@ -673,6 +685,14 @@ mod tests {
     }
 
     #[test]
+    fn non_hex_characters_are_rejected() {
+        // u8::from_str_radix accepts a leading '+'; a proof must have one canonical encoding.
+        let p = proof_hex(K, N);
+        let plus = format!("+{}", &p[1..]);
+        assert!(!verify_hex(K, N, &plus));
+    }
+
+    #[test]
     fn proof_is_deterministic() {
         assert_eq!(proof_hex(K, N), proof_hex(K, N));
     }
@@ -717,7 +737,7 @@ pub fn verify_hex(secret: &[u8], nonce: &[u8], candidate: &str) -> bool {
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.is_empty() || s.len() % 2 != 0 {
+    if s.is_empty() || !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
@@ -727,7 +747,7 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p phonecam-core pairing`
-Expected: `4 passed`.
+Expected: `5 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -749,6 +769,7 @@ Transitions (spec §7.2–7.4):
 | From | Event | To | Actions |
 |---|---|---|---|
 | Idle / Reconnecting | `PhoneJoined` | Connecting | none |
+| Connecting | `ConnectTimedOut` (transport fires it 10 s after `PhoneJoined` without media) | Reconnecting{1} | `SetVcam(Reconnecting)`, `SendRestartIce`, `ScheduleRetry{10_000}` |
 | Connecting / Reconnecting | `MediaConnected` | Live | `SetVcam(Camera)`; backoff reset |
 | Live / Paused | `HeartbeatLost` | Reconnecting{1} | `SetVcam(Reconnecting)`, `SendRestartIce`, `ScheduleRetry{10_000}` |
 | Reconnecting{n} | `RetryTimerFired` | Reconnecting{n+1} | `SendRestartIce`, `ScheduleRetry{backoff}` |
@@ -761,6 +782,8 @@ Transitions (spec §7.2–7.4):
 | any other combination | — | unchanged | none |
 
 `Idle` shows the placeholder frame. The caller sets it once at startup via `Conn::initial_vcam()`.
+
+**What `SendRestartIce` means for transport:** send `Signal::RestartIce` over the DataChannel if it's open, otherwise through the relay. With the relay design, "full re-signal" (spec §7.2) is the same message on the relay path: the phone re-offers. That's why core has no separate `Resignal` action. Deferred to transport: the "Wi-Fi stable for 30 s → move back" restart (§7.1), which depends on interface watching.
 
 **Files:**
 - Create: `crates/phonecam-core/src/conn.rs`
@@ -795,6 +818,18 @@ mod tests {
         assert_eq!(c.state(), ConnState::Connecting);
         assert_eq!(c.handle(Event::MediaConnected), vec![Action::SetVcam(VcamFrame::Camera)]);
         assert_eq!(c.state(), ConnState::Live);
+    }
+
+    #[test]
+    fn connect_timeout_starts_restarting() {
+        let mut c = Conn::new();
+        c.handle(Event::PhoneJoined);
+        assert_eq!(c.handle(Event::ConnectTimedOut), vec![
+            Action::SetVcam(VcamFrame::Reconnecting),
+            Action::SendRestartIce,
+            Action::ScheduleRetry { ms: 10_000 },
+        ]);
+        assert_eq!(c.state(), ConnState::Reconnecting { attempt: 1 });
     }
 
     #[test]
@@ -918,6 +953,8 @@ pub enum VcamFrame {
 pub enum Event {
     PhoneJoined,
     MediaConnected,
+    /// No media within 10 s of `PhoneJoined` (timer owned by transport).
+    ConnectTimedOut,
     HeartbeatLost,
     RetryTimerFired,
     CameraPaused(PauseReason),
@@ -971,7 +1008,7 @@ impl Conn {
                 self.backoff.reset();
                 vec![Action::SetVcam(VcamFrame::Camera)]
             }
-            (Live | Paused(_), Event::HeartbeatLost) => {
+            (Live | Paused(_), Event::HeartbeatLost) | (Connecting, Event::ConnectTimedOut) => {
                 self.state = Reconnecting { attempt: 1 };
                 vec![
                     Action::SetVcam(VcamFrame::Reconnecting),
@@ -1004,7 +1041,7 @@ impl Conn {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p phonecam-core conn`
-Expected: `11 passed`.
+Expected: `12 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1040,7 +1077,7 @@ pub use protocol::{Ctl, PauseReason, Role, Signal, PROTOCOL_VERSION};
 - [ ] **Step 2: Full test + lint**
 
 Run: `cargo test -p phonecam-core && cargo clippy -p phonecam-core -- -D warnings`
-Expected: `37 passed` (3+6+3+4+6+4+11) and clippy finishes with no warnings.
+Expected: `40 passed` (3+7+3+4+6+5+12) and clippy finishes with no warnings.
 
 - [ ] **Step 3: Portability gate (iOS target)**
 
