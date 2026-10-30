@@ -41,7 +41,7 @@ Updated: 2026-10-30
 - Still blocked on the user: `regsvr32` (admin) to make "PhoneCam" visible in apps.
 
 ## Next step
-Execute the phonecam-core plan with superpowers:subagent-driven-development (1 task at a time: Sonnet implementer + review), then write the transport plan.
+phonecam-core DONE (9135fe5): 40 tests, clippy clean, iOS check ok (verified by agy). Next: transport plan as SHORT contracts (Opus), implementation by agy (Haiku fallback).
 
 ## Previous next step
 Relay DNS live → user runs the relay command and scans the QR on the iPhone → record checkpoints 5–6 → update the spec → write the plan.
