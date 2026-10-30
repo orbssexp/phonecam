@@ -1,7 +1,7 @@
 # PhoneCam — Design Spec
 
 Date: 2026-10-29
-Status: Reviewed — awaiting user approval
+Status: Approved; revised after Round 0 (2026-10-30)
 
 ## 1. Goal
 
@@ -26,9 +26,16 @@ All Phase 1 code that isn't platform-specific must be portable to Phase 2 (and t
 
 - iOS revokes camera access when the app/page goes to background, the phone locks, or a call comes in. No app can bypass this. We mitigate (§7) rather than prevent.
 - Safari cannot control screen brightness. Phase 1 uses a black overlay instead; Phase 2 sets brightness natively.
-- Safari `getUserMedia` requires a secure context → the desktop app serves HTTPS with a local certificate the user trusts once on the iPhone.
-- Safari exposes lens choice (via `enumerateDevices`) and resolution/FPS. `zoom` and `torch` constraints are **not guaranteed** on iOS Safari — availability is verified in Round 0 on the user's iPhone/iOS version. If `zoom` is unavailable, zoom falls back to lens switching + desktop-side digital crop. If `torch` is unavailable, the control is hidden. Manual focus/exposure is Phase 2 only.
-- Safari's encoder bitrate and max resolution are browser-controlled; `RTCRtpSender.setParameters({maxBitrate})` is a hint. 1080p60 / 4K are best-effort.
+- Safari `getUserMedia` requires a secure context. **Resolved in Round 0:** the phone page is hosted on Vercel (a publicly trusted certificate) and signaling goes through a Cloudflare relay (§13). There is no local certificate.
+- **Verified on iOS 18.7 (Round 0):**
+  - Lenses: Front, Back Camera, Back Ultra Wide, Back Dual Wide.
+  - `zoom` works, 0.5–10 on Back Dual Wide.
+  - `torch` works on the rear cameras.
+  - 720p30, 1080p30 and 4K30 are all delivered.
+  - Lens and resolution switch live via `replaceTrack`.
+  - If a capability is missing on another model, its control is hidden.
+  - Manual focus/exposure is Phase 2 only.
+- Safari's encoder bitrate is browser-controlled; `RTCRtpSender.setParameters({maxBitrate})` is a hint. 1080p60 is best-effort.
 - USB fallback in Phase 1 uses iPhone **Personal Hotspot over USB** (creates a 172.20.10.x network). Requires hotspot enabled; some carriers block it.
 
 ## 4. Stack
@@ -61,7 +68,8 @@ phonecam/
 │  └─ vcam-win             # Windows: softcam wrapper + placeholder frames
 ├─ apps/
 │  ├─ desktop/             # Tauri app (src-tauri + React UI)
-│  ├─ web-client/          # Safari sender page
+│  ├─ web-client/          # Safari sender page (Vercel)
+│  ├─ relay/               # Cloudflare Worker signaling relay
 │  └─ ios/                 # Phase 2 (empty placeholder README only)
 └─ protocol/               # generated TS types + protocol docs
 ```
@@ -77,12 +85,12 @@ iPhone (Safari)                          Windows (Tauri)
 │ pinch zoom   │ ◄── DataChannel ──── │   (Auto/NVDEC/D3D11/CPU)       │
 │ black screen │   controls + ping    │   → vcam-win "PhoneCam" ───────┼─► Zoom/OBS/Teams
 └──────────────┘                      │   → 15fps preview → React UI   │
-       ▲  HTTPS/WSS + QR (pairing)    │ HTTPS/WSS server, tray icon    │
-       └──────────────────────────────┴────────────────────────────────┘
+   ▲ page from Vercel (HTTPS)         │ relay client, tray icon        │
+   └──── signaling (KBs) ── Cloudflare relay ── signaling ────────────┘
 ```
 
-1. Desktop app starts → generates/loads local CA + cert → starts HTTPS/WSS server on all interfaces → shows QR with URL.
-2. iPhone scans QR → Safari opens page → user taps Start → `getUserMedia` → page opens WSS → SDP/ICE exchange → WebRTC peer established.
+1. The desktop app starts, generates a random room id, connects to the Cloudflare relay as `desktop`, and shows a QR code for `https://<page>/#room=<id>&relay=<wss url>`.
+2. The iPhone scans the QR code. Safari opens the Vercel page, the user taps Start, and `getUserMedia` runs. The page joins the same relay room as `phone`, SDP/ICE are exchanged through the relay, and the WebRTC peer is established. **Media flows directly over the LAN or USB, never through the relay.**
 3. Video: phone hardware H.264 → RTP → str0m → decoder → NV12 → BGR → softcam shared memory.
 4. DataChannel `ctl` (reliable): controls, state, battery level, heartbeat.
 5. Preview: decoder output downscaled to ≤480p at ≤15 fps, sent to UI only while the window exists and is visible.
@@ -94,7 +102,8 @@ iPhone (Safari)                          Windows (Tauri)
 - The desktop is an **ICE-lite** endpoint (str0m supports it); Safari is the controlling agent and nominates. The desktop influences the choice through **candidate local-preference**: Wi-Fi host candidates get the highest priority, USB-hotspot next. (Mechanism to be confirmed in Round 0; see §17.)
 - Safari exposes real host candidates once camera permission is granted; the desktop also accepts peer-reflexive candidates, so mDNS `.local` candidates are never required.
 - **Failover:** the phone is always the offerer, including on restarts. When the heartbeat (§7.2) detects loss, the desktop sends `restart_ice` over WSS (or the phone detects loss itself). The phone then creates an ICE-restart offer, and the desktop's answer lists only candidates on interfaces that are currently up, so the session moves to USB if Wi-Fi is gone. When Wi-Fi comes back and stays stable for 30 s, the desktop sends one `restart_ice` to move back to Wi-Fi. If local-preference turns out not to steer Safari's choice (Round 0 checkpoint 5), the desktop prunes its advertised candidates down to the preferred path.
-- **Signaling on multiple paths:** in `hello`, the desktop sends the page a list of all its addresses (Wi-Fi and USB). If the WSS drops, the page tries those addresses in priority order. The leaf certificate's SAN covers every current address, including 172.20.10.x, so any of them works without a certificate warning (§13).
+- **Runtime interface watch (Round 0 finding):** the desktop must detect interfaces that appear or disappear while running, especially the Apple Mobile Device Ethernet adapter that shows up when USB Personal Hotspot starts. It binds a UDP socket on each new interface and adds that candidate on the next ICE restart. In Round 0 the spike bound only to startup interfaces, so Wi-Fi-off was unrecoverable.
+- **Signaling resilience:** signaling goes through the relay. Both sides reconnect to the relay with backoff of 1 s → 30 s. Once the DataChannel is up, `restart_ice` and the re-offer travel over the DataChannel first, falling back to the relay if it's down. Signaling during a network switch therefore doesn't depend on internet access.
 - The UI shows the active path badge (Wi-Fi / USB) and the RTT measured by the heartbeat on the active path.
 
 ### 7.2 Heartbeat & recovery
@@ -112,6 +121,11 @@ iPhone (Safari)                          Windows (Tauri)
   - `Paused` (camera revoked: call/background/lock) → last frame blurred + "Paused on phone"
   - `Idle` (never connected) → branded placeholder "Scan QR to connect"
 - Placeholder frames are rendered at the negotiated resolution, at 5 fps (cheap).
+- **Fixed output size (Round 0 finding):** the virtual camera's resolution is set by the user's output setting (default 1080p) and **never changes while apps are using it**. When the phone changes resolution, frames are scaled into the fixed output on the GPU (or with libyuv). The spike re-created the device on each change, which would drop the camera in Zoom.
+
+### 7.3a Packet-loss recovery (Round 0 finding)
+- On Wi-Fi, Round 0 saw 0.4–3.6% loss bursts every 30–60 s. Recovering only by PLI gave up to 1 s freezes.
+- The real app negotiates **NACK + RTX** (retransmit lost packets; recovers within ~1 RTT, which is about 5 ms on the LAN), **TWCC** (bandwidth feedback, so Safari doesn't throttle), and a **small jitter buffer** (≤ 50 ms). PLI becomes the last resort.
 
 ### 7.4 Phone-side interruptions
 - Detect `track.onended` / `track.onmute` / `visibilitychange`.
@@ -128,11 +142,12 @@ Sent desktop → phone over `ctl`; phone applies and echoes actual values back (
 
 | Control | Phone implementation | Desktop UI | Phone UI |
 |---|---|---|---|
-| Lens (0.5× / 1× / 2–3×) | switch `deviceId` + `replaceTrack` | segmented buttons | buttons above viewfinder |
-| Resolution / FPS | `applyConstraints`, fallback to re-acquire | select | — |
+| Lens | **default: Back Dual Wide** (zoom 0.5–10, one device spans ultra-wide to tele, like the Camera app); other lenses via `deviceId` + `replaceTrack` | segmented buttons | 0.5× / 1× / 2× buttons above viewfinder (zoom presets on Dual Wide) |
+| Resolution / FPS | re-acquire + `replaceTrack` (live, no renegotiation; proven in Round 0) | select | — |
 | Zoom | `applyConstraints({zoom})` | slider + mouse wheel / touchpad pinch over preview | **pinch on viewfinder** (page zoom disabled) |
 | Torch | `applyConstraints({torch})` | toggle | toggle |
-| Mirror | applied on desktop before softcam | toggle | — |
+| Mirror (output) | applied on desktop before softcam; **default off**, so others see you correctly | toggle | — |
+| Mirror (preview) | CSS flip of the phone preview only; remembered per phone | — | toggle |
 | Rotation 0/90/180/270 | applied on desktop before softcam | button | — |
 
 Unsupported capabilities (per `getCapabilities()`) are hidden, not disabled.
@@ -143,7 +158,7 @@ Unsupported capabilities (per `getCapabilities()`) are hidden, not disabled.
 |---|---|---|
 | Economy | 720p30 | ~2.5 Mbps |
 | Balanced (default) | 1080p30 | ~5 Mbps |
-| Quality | 1080p60 (4K30 if supported) — best-effort, Safari may cap at 1080p30 | ~10–20 Mbps (hint via `maxBitrate`) |
+| Quality | 4K30 (verified in Round 0) or 1080p60 (best-effort) | ~10–20 Mbps (hint via `maxBitrate`) |
 
 Phone sends exactly the selected resolution — no scaling on the PC.
 
@@ -152,7 +167,7 @@ Phone sends exactly the selected resolution — no scaling on the PC.
 ## 10. Decoder selection
 
 - Setting: **Auto (default)** | NVIDIA (CUDA/NVDEC) | GPU (D3D11VA) | CPU.
-- Auto order: **D3D11VA on the NVIDIA adapter** if an NVIDIA GPU is present (it uses the same NVDEC hardware without loading the CUDA runtime, which saves RAM) → D3D11VA on any other GPU → CPU.
+- Auto order (**user decision 2026-10-30: always use NVIDIA when available**): **D3D11VA on the NVIDIA adapter** if an NVIDIA GPU is present (it uses the same NVDEC hardware without loading the CUDA runtime, which saves RAM) → D3D11VA on any other GPU → CPU. Round 0 confirmed Auto picks the RTX 5060 Ti and decodes 4K30.
 - "NVIDIA (CUDA/NVDEC)" is an explicit opt-in; it costs more RAM (CUDA context) and is excluded from the tray-only RAM target.
 - Any hardware init/decode failure falls back to the next option automatically and the UI shows a notice.
 - UI shows active decoder and app CPU/GPU usage.
@@ -166,9 +181,12 @@ These are **targets** that Round 0 validates; if the spike shows one is unrealis
 
 | Scenario | RAM (whole process tree) | CPU |
 |---|---|---|
-| Tray only, streaming 1080p30, Auto (D3D11VA) | < 40 MB | < 3% |
-| Tray only, streaming 1080p30, CPU decode | < 50 MB | < 10% |
-| Window open, streaming, preview on | < 180 MB | < 6% |
+| Tray only, streaming 1080p30, Auto (D3D11VA) | < 60 MB | < 3% |
+| Tray only, streaming 1080p30, CPU decode | < 40 MB | < 5% |
+| Tray only, streaming 4K30, Auto (D3D11VA) | < 150 MB | < 5% |
+| Window open, streaming 1080p30, preview on | < 200 MB | < 6% |
+
+Round 0 baseline for the receiver alone at 1080p30: D3D11VA 44.7 MB / 1.5%, CPU 21.6 MB / 1.1%, CUDA 134 MB / 1.2%. At 4K with three softcam re-creations it reached about 226 MB; the fixed output size (§7.3) removes the re-creations.
 
 Techniques:
 - Full-resolution frames never cross into the UI.
@@ -187,38 +205,46 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
   - Connection — path badge (Wi-Fi/USB), latency, bitrate, phone battery, Reconnect button.
   - Camera — lens segmented control, resolution/FPS select, zoom slider, torch/mirror/rotate toggles.
   - Performance — energy profile, decoder select + active decoder, CPU/GPU usage.
-- Empty state: QR code + first-time setup steps (certificate trust).
+- Empty state: a QR code plus "Scan with your iPhone camera". There is no setup step.
 
 **Phone page:**
 - Full-screen viewfinder with pinch zoom, lens buttons, status pill.
 - Big "Start" on first load; big "Resume" after interruption.
 - Black-screen button.
 
-## 13. First-time setup (HTTPS trust)
+## 13. Hosting & first-time setup (decided after Round 0)
 
-1. App generates a local root CA (stored in app data) with **X.509 Name Constraints** limiting it to private IP ranges (10/8, 172.16/12, 192.168/16) and `phonecam.local`, so even if its key leaked it could not impersonate public sites. The CA key file is readable only by the current Windows user. CA validity: 10 years.
-2. The app issues a leaf cert with **SAN IP entries for every current address** (Wi-Fi, USB 172.20.10.x, others), **validity ≤ 398 days** (the iOS limit). The leaf is re-issued when the address set changes or 30 days before expiry, and hot-reloaded by the HTTPS server; the CA does not change, so the phone needs no new trust step.
-3. The empty state shows QR #1 → a **plain HTTP** URL on a separate setup port that serves only the CA as an iOS `.mobileconfig`. HTTP is used to avoid a chicken-and-egg problem: HTTPS can't be trusted before the CA is installed. The setup port closes once a phone has connected over HTTPS.
-4. The user installs the profile and enables it in Settings → General → About → Certificate Trust Settings. Instructions are shown with screenshots.
-5. QR #2 → opens the HTTPS camera page, which includes the pairing secret (§14a). After setup, only QR #2 is shown.
+The local CA approach is **dropped**. It needed profile install + trust steps, and on the user's phone it failed on the first try because the spike regenerated the CA on each run.
+
+- **Phone page:** static files in `apps/web-client/`, deployed to **Vercel** with a publicly trusted HTTPS certificate. Git pushes to `main` auto-deploy (the root `vercel.json` points the output directory at the page).
+- **Signaling relay:** a **Cloudflare Worker** with a Durable Object `Room` (`apps/relay/`).
+  - Each room holds at most 2 peers (desktop, phone) and needs an id of at least 128 bits.
+  - Text is forwarded verbatim, with a 64 KB message cap and **nothing stored**.
+  - It's free tier, using WebSocket Hibernation.
+- **Setup is just scanning the QR code.** There is nothing to install or trust on the phone.
+- **Needs internet only for signaling** (pairing and relay-based reconnects). Video never touches the internet. Once paired, ICE restarts go over the DataChannel when possible (§7.1).
 
 ## 14. Protocol (summary)
 
-- Signaling (WSS, JSON): `hello{token,role,version,hmac}`, `welcome{addresses[]}`, `offer` (always phone → desktop), `answer`, `ice`, `restart_ice` (desktop → phone), `bye`.
+- Relay control (from the relay itself): `{"t":"peer","up":bool}`.
+- Signaling (through the relay, or over the DataChannel once it's up; JSON): `hello{token,role,version,proof}`, `offer` (always phone → desktop), `answer`, `restart_ice` (desktop → phone), `bye`.
 - Control (DataChannel `ctl`, JSON): `ping{t}` / `pong{t,battery,charging,camState}`, `set{lens|res|fps|zoom|torch|profile}`, `state{...actual values, capabilities}`, `paused{reason}`, `resumed`.
 - Versioned (`version` field); Rust types are the source of truth; TS types generated.
 
 ## 14a. Security & Windows integration
 
-- **Pairing:** the desktop generates a random 128-bit pairing secret. QR #2's URL carries it in the fragment (`#k=…`, which never leaves the phone in HTTP requests). `hello` must include an HMAC of a server nonce computed with that secret; otherwise the WSS closes. A successful pairing yields a long-lived device token, stored in the page's `localStorage` and in desktop app data, for reconnects. "Forget phone" in the UI revokes it and rotates the secret.
-- **One phone at a time:** a second paired device is rejected while one is live.
-- **LAN exposure:** servers bind only to private-range interfaces (never public IPs), and the HTTPS server serves only the camera page and the WSS endpoint.
-- **Windows Firewall:** the installer adds inbound rules for the app's ports on the **Private** profile only. If the active network is classified Public, the UI shows a tip.
+- **Pairing:** the QR URL fragment carries a random 128-bit **room id** and a separate 128-bit **pairing secret** `k`. Fragments never reach Vercel or Cloudflare in HTTP requests.
+  - The relay sees only the room id. The secret proves identity end-to-end: `hello.proof` is an HMAC of the desktop's nonce under `k`, checked by the desktop.
+  - SDP is signed with `k` too, so a relay that tampered with it would be detected; this pins the DTLS fingerprints.
+  - A successful pairing yields a long-lived device token (in the page's `localStorage` and in desktop app data) for reconnects. "Forget phone" revokes it and rotates the secret.
+- **One phone at a time:** the relay already allows only one `phone` per room, and the desktop rejects an unproven peer.
+- **LAN exposure:** the desktop opens **no listening TCP ports**, only UDP sockets for WebRTC on private-range interfaces.
+- **Windows Firewall:** the installer adds an inbound UDP rule for the app on the **Private** profile only. If the active network is classified Public, the UI shows a tip.
 - **Single instance:** a second launch focuses the existing tray app instead.
 
 ## 15. Error handling
 
-- Every failure surfaces as a state in core, never a crash: decoder failure → fallback; softcam missing → UI error with "Repair" (re-register, needs admin once); leaf cert expiring → rotated silently (§13); CA expired/lost/regenerated → the app shows QR #1 again; port in use → pick next free port and update QR.
+- Every failure surfaces as a state in core, never a crash: decoder failure → fallback; softcam missing → UI error with "Repair" (re-register, needs admin once); relay unreachable → keep any live session, retry with backoff, and show "Offline: can't pair new phone" in the UI; UDP port in use → pick another port.
 - Logs: rotating file in app data, 5 MB cap.
 
 ## 16. Testing
@@ -242,8 +268,20 @@ Dark mode only. shadcn/ui components, lucide icons, neutral palette, one accent 
   7. On the user's iPhone: the name-constrained CA installs, gets trusted, and the HTTPS page loads with no warning. If iOS rejects the Name Constraints, drop the extension and keep the other mitigations.
   - **No-go criteria:** checkpoint 1 or 2 can't be made to pass within the spike. **Fallback** (keeps the Rust core and the portability goal): swap str0m for `webrtc-rs`, which has a fuller RTP pipeline (NACK/TWCC interceptors), behind the same `phonecam-transport` API. Electron is not a fallback.
   - The §11 targets get revised from checkpoint 3 and 6 results before Round 1.
-- **Round 1 (≤3 agents, separate worktrees):** (1) `decode-win` + `vcam-win`; (2) `phonecam-core` + `phonecam-transport` + HTTPS/WSS + cert; (3) `web-client`.
-- **Round 2 (≤3 agents):** (1) desktop React/shadcn UI + tray lifecycle; (2) resilience integration (§7); (3) tests + perf harness.
+  - **Round 0 outcome (2026-10-30): GO for str0m.**
+    - Checkpoints 1, 2, 3 and 6 PASS on a real iPhone.
+    - Checkpoint 7 is superseded by Vercel + relay.
+    - Checkpoint 4 is pending admin registration.
+    - Checkpoint 5 failed in the spike, as expected with no failover code; it is now a Round 1 requirement (§7.1, §7.3a).
+    - See `docs/spike-results.md`.
+- **Round 1 (≤3 agents, separate worktrees):**
+  1. `decode-win` + `vcam-win` (fixed output size + scaling).
+  2. `phonecam-core` + `phonecam-transport` (NACK/RTX/TWCC, interface watch, heartbeat, `restart_ice`, relay client).
+  3. `web-client` + `relay` (moved out of `spike/`, with pairing proof).
+- **Round 2 (≤3 agents):**
+  1. Desktop React/shadcn UI + tray lifecycle.
+  2. Resilience integration (§7).
+  3. Tests + perf harness.
 - `npm install` / `cargo build` serialized; never in parallel.
 
 ## 18. Out of scope (Phase 1)
