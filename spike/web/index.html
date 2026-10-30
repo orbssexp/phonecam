@@ -40,6 +40,9 @@
 var $ = function(id){return document.getElementById(id);};
 var ws=null, pc=null, track=null, stream=null, ctl=null, sender=null, torchOn=false, statsTimer=null, wsOpenQ=[];
 var params = new URLSearchParams(location.search);
+var frag = new URLSearchParams(location.hash.replace(/^#/,''));
+var RELAY = frag.get('relay'), ROOM = frag.get('room'), relayMode = !!(RELAY && ROOM);
+var peerUp = false, peerWaiters = [];
 
 function log(m){
   var line=(performance.now()/1000).toFixed(2)+' '+m;
@@ -51,13 +54,21 @@ window.onerror=function(m){log('ERR '+m);};
 
 function openWs(){
   return new Promise(function(res,rej){
-    var url=(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';
+    var url = relayMode ? RELAY.replace(/[/]+$/,'')+'/room/'+encodeURIComponent(ROOM)+'?role=phone'
+                        : (location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';
     ws=new WebSocket(url);
-    ws.onopen=function(){log('ws open '+url);res();};
+    ws.onopen=function(){log('ws open '+(relayMode?'(relay)':url));res();};
     ws.onerror=function(){rej(new Error('ws error'));};
     ws.onclose=function(){log('ws closed');};
     ws.onmessage=function(ev){
       var m=JSON.parse(ev.data);
+      if(m.t==='peer'){
+        log('relay peer up='+m.up);
+        var was=peerUp; peerUp=m.up;
+        if(m.up){ var w=peerWaiters; peerWaiters=[]; w.forEach(function(f){f();}); }
+        if(m.up && !was && pc && pc.connectionState!=='connected'){ iceRestart(); }
+        return;
+      }
       if(m.type==='answer'){ pc.setRemoteDescription({type:'answer',sdp:m.sdp}).then(function(){log('answer applied');}).catch(function(e){log('answer ERR '+e);}); }
       else if(m.type==='hello'){ log('hello addrs='+JSON.stringify(m.addresses)); }
       else if(m.type==='restart_ice'){ log('server asked restart_ice'); iceRestart(); }
@@ -137,6 +148,10 @@ async function start(){
     $('start').disabled=true;
     await getCam();
     await openWs();
+    if(relayMode && !peerUp){
+      log('waiting for desktop on relay...');
+      await new Promise(function(r){ peerWaiters.push(r); setTimeout(r,15000); });
+    }
     pc=new RTCPeerConnection({iceServers:[],bundlePolicy:'max-bundle'});
     pc.oniceconnectionstatechange=function(){log('iceConnectionState='+pc.iceConnectionState);};
     pc.onconnectionstatechange=function(){log('connectionState='+pc.connectionState);};

@@ -33,3 +33,17 @@ Undo with `regsvr32 /u`.
 
 ## Phone (checkpoints 5-7)
 See `docs/spike-results.md`.
+
+## Relay mode (iPhone page on Vercel, signaling via Cloudflare Worker)
+The sender page is static HTTPS (trusted cert, no local CA/profile). Only SDP/ICE (a few KB) goes through the relay; video stays peer-to-peer on LAN/USB (ICE host candidates). The page reads `#room=<id>&relay=<wss url>` from the URL fragment (never sent to servers); without a fragment it falls back to the old local mode.
+
+Deploy (orchestrator runs these; they need login):
+```
+cd spike/relay && npm install && npx wrangler deploy      # prints https://phonecam-relay.<acct>.workers.dev
+cd spike/web   && npx vercel deploy --prod                # prints https://<project>.vercel.app
+```
+Run (desktop generates a 128-bit room id, prints/QRs the phone URL, reconnects to the relay with backoff 1-30 s):
+```
+run.bat --relay wss://<worker>.workers.dev --page https://<project>.vercel.app/ --decoder d3d11
+```
+Local test (no deploy): `cd spike/relay && npx wrangler dev --port 8787`, serve `spike/web` on :8000, then `run.bat --relay ws://127.0.0.1:8787 --page http://127.0.0.1:8000/` and open the printed URL (add `?auto=1` before `#` to auto-start).
