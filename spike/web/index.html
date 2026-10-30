@@ -28,7 +28,7 @@
   </select>
 </div>
 <div>
-  <button id="zoomUp">zoom +</button><button id="zoomDn">zoom -</button><button id="torch">torch toggle</button>
+  <button id="zoomUp">zoom +</button><button id="zoomDn">zoom -</button><button id="torch">torch toggle</button><button id="mirror">mirror preview</button>
 </div>
 <video id="v" playsinline muted autoplay></video>
 <h3>Track capabilities</h3><pre id="caps">-</pre>
@@ -248,6 +248,12 @@ $('stop').onclick=function(){
   if(ws){ws.onclose=null;ws.close();ws=null;} peerUp=false;  // free the relay slot so Start can rejoin
   $('start').disabled=false; log('stopped');
 };
+// Preview-only flip: iOS mirrors the front-camera preview itself; the frames sent to the PC are not affected.
+var mirrored=false;
+try{ mirrored = localStorage.getItem('pc-mirror')==='1'; }catch(e){}
+function applyMirror(){ $('v').style.transform = mirrored ? 'scaleX(-1)' : ''; $('mirror').textContent='mirror preview: '+(mirrored?'on':'off'); }
+$('mirror').onclick=function(){ mirrored=!mirrored; try{ localStorage.setItem('pc-mirror', mirrored?'1':'0'); }catch(e){} applyMirror(); log('preview mirror '+mirrored); };
+applyMirror();
 $('lens').onchange=switchCam;
 $('res').onchange=switchCam;
 
