@@ -64,3 +64,35 @@ Tauri 2 + React + shadcn/ui + lucide, dark by default, following the Windows the
 Round 1, in parallel: A (Sonnet), B (agy), C (agy). Each works in its own git worktree/branch; the orchestrator merges.
 Round 2: D.
 Then the user test: run the installer, scan, open Zoom.
+
+## D contract detail (round 2)
+
+New wire message (core, add a serde round-trip test). Phone → PC on DC open and after every lens switch:
+`Ctl::Caps { lenses: Vec<LensInfo{id,label}>, current: String, zoom_min: f32, zoom_max: f32, torch: bool }`
+JSON: `{"type":"caps","lenses":[{"id":"..","label":".."}],"current":"..","zoom_min":1,"zoom_max":10,"torch":true}`
+
+IPC (Tauri 2). Rust owns everything; UI is a thin view.
+- `get_state() -> AppState`
+- `set_settings(patch: Partial<Settings>) -> AppState` — persists to `%APPDATA%\PhoneCam\settings.json`; lens/profile/zoom/torch → `Ctl::Set`; mirror/decoder → media.
+- `new_pairing() -> AppState` — new room id + 32-byte secret, restarts the receiver.
+- `get_preview() -> Option<String>` — base64 JPEG (max_w 640). The UI polls at ≤15 fps only while the document is visible and conn == "live".
+- Event `"state"` (payload AppState) on every change; throttle to ≤4/s.
+```ts
+type AppState = {
+  phoneUrl: string; qrSvg: string;                       // qrcode crate, SVG string
+  conn: "idle"|"connecting"|"live"|"paused"|"reconnecting";
+  pauseReason: "call"|"background"|"locked"|"unknown"|null;
+  path: "lan"|"usb"|null; rttMs: number|null; battery: number|null; charging: boolean|null;
+  decoderName: string|null; fps: number; width: number; height: number;
+  lenses: {id:string,label:string}[]; zoomMin: number; zoomMax: number; torchAvailable: boolean;
+  settings: { lens: string|null; profile: "economy"|"balanced"|"quality"; zoom: number;
+              torch: boolean; mirror: boolean; decoder: "auto"|"cuda"|"cpu" };
+}
+```
+Output mirror: media-win gets `handle.set_mirror(bool)` (horizontal flip after letterbox, unit test).
+Decoder change restarts Media without recreating softcam? softcam is created once per process — keep the vcam object, restart only the decoder thread.
+
+Split:
+- D1 (Sonnet, `apps/desktop/src-tauri` + core Caps + media mirror): Tauri app, tray (Open/Quit, left-click opens), close/minimize → hide window + `skip_taskbar` + destroy webview (recreate on Open), single-instance plugin, settings file, the IPC above. Mock-free: wire real transport + media. Default relay/page URLs = the live ones.
+- D2 (agy, `apps/desktop/src` React + Vite + Tailwind + shadcn + lucide): UI against the IPC above via `@tauri-apps/api/core` `invoke` and `listen`. Dark default, follows `prefers-color-scheme`. Layout ≈ 900×600: left = QR (idle/connecting) or preview `<img>` (live) with an overlay pill (icon + text) for paused/reconnecting; right = cards Connection / Camera / Decoder. Desktop HIG: 13 px body, 28 px min controls, state = icon + text, explicit verbs ("New pairing code"). No custom theme toggle.
+- D3 (agy, `apps/web-client`): send `caps` on DC open and after each lens switch; apply incoming `ctl set` {profile,zoom,torch,lens}; send `paused`/`resumed` on visibilitychange.
