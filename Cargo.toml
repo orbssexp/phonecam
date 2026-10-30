@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["crates/phonecam-core", "crates/phonecam-media-win"]
+members = ["crates/phonecam-core", "crates/phonecam-media-win", "crates/phonecam-transport"]
 exclude = ["spike"]
