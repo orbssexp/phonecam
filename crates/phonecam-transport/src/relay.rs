@@ -20,6 +20,8 @@ pub(crate) fn spawn(
     stop: watch::Receiver<bool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // wss:// needs a process-wide rustls crypto provider; without it the first TLS connect panics.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
