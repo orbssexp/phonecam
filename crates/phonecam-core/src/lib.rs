@@ -5,3 +5,4 @@ pub mod protocol;
 pub mod backoff;
 pub mod heartbeat;
 pub mod path;
+pub mod pairing;
