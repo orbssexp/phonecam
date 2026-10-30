@@ -680,14 +680,56 @@ async function applyBitrate(){
   }
 }
 
+// Contract D: {type:'caps', lenses, current, zoom_min, zoom_max, torch}
 function sendCaps(){
-  if (ctl && ctl.readyState === 'open' && track) {
+  if (!(ctl && ctl.readyState === 'open')) return;
+  var caps = (track && track.getCapabilities) ? track.getCapabilities() : {};
+  var st = (track && track.getSettings) ? track.getSettings() : {};
+  var sel = $('lens');
+  var lenses = Array.prototype.map.call(sel.options, function(o){
+    return { id: o.value, label: o.textContent };
+  });
+  var z = caps.zoom || {};
+  try {
     ctl.send(JSON.stringify({
       type: 'caps',
-      caps: track.getCapabilities ? track.getCapabilities() : {},
-      settings: track.getSettings ? track.getSettings() : {},
-      ua: navigator.userAgent
+      lenses: lenses,
+      current: st.deviceId || sel.value || '',
+      zoom_min: z.min !== undefined ? z.min : 1,
+      zoom_max: z.max !== undefined ? z.max : 1,
+      torch: !!caps.torch
     }));
+  } catch(e) { log('caps send ERR ' + e); }
+}
+
+// Profile name -> resolution option value (must exist in #res)
+var PROFILES = {
+  economy: '1280x720@30',
+  balanced: '1920x1080@30',
+  quality: '3840x2160@30'
+};
+
+// Incoming ctl {type:'set', profile?, zoom?, torch?, lens?}
+// Lens/profile change re-acquires the track, which resets zoom/torch, so those apply after it.
+async function handleSet(m){
+  var needSwitch = false;
+  var resVal = PROFILES[m.profile];
+  if (resVal && $('res').value !== resVal) {
+    $('res').value = resVal;
+    needSwitch = true;
+  }
+  var sel = $('lens');
+  if (m.lens && m.lens !== sel.value && Array.prototype.some.call(sel.options, function(o){ return o.value === m.lens; })) {
+    hasUserSelectedLens = true;
+    sel.value = m.lens;
+    needSwitch = true;
+  }
+  if (needSwitch) await switchCam();
+  if (m.zoom !== undefined && m.zoom !== null) await applyZoom(+m.zoom);
+  if (m.torch !== undefined && m.torch !== null) {
+    torchOn = !!m.torch;
+    await applyC({ torch: torchOn });
+    updateTorchBtn();
   }
 }
 
@@ -795,30 +837,21 @@ async function start(){
       try {
         var m = JSON.parse(ev.data);
         if (m.type === 'ping') {
-          var reply = { type: 'pong', t: m.t };
+          var reply = { type: 'pong', t: m.t, battery: null, charging: null };
+          var sendPong = function(){
+            try { ctl.send(JSON.stringify(reply)); } catch(e) {}
+          };
           if (navigator.getBattery) {
             navigator.getBattery().then(function(b){
               reply.battery = b.level;
               reply.charging = b.charging;
-              ctl.send(JSON.stringify(reply));
-            }).catch(function(){
-              ctl.send(JSON.stringify(reply));
-            });
+              sendPong();
+            }).catch(sendPong);
           } else {
-            ctl.send(JSON.stringify(reply));
+            sendPong();
           }
         } else if (m.type === 'set') {
-          if (m.zoom !== undefined && m.zoom !== null) applyZoom(m.zoom);
-          if (m.torch !== undefined && m.torch !== null) {
-            torchOn = !!m.torch;
-            applyC({ torch: torchOn });
-            updateTorchBtn();
-          }
-          if (m.lens && m.lens !== $('lens').value) {
-            hasUserSelectedLens = true;
-            $('lens').value = m.lens;
-            switchCam();
-          }
+          handleSet(m);
         }
       } catch(e) {}
       log('ctl msg ' + ev.data);
@@ -991,6 +1024,9 @@ document.addEventListener('visibilitychange', async function(){
     }
   } else if (document.visibilityState === 'visible') {
     log('visibility: visible');
+    if (ctl && ctl.readyState === 'open') {
+      try { ctl.send(JSON.stringify({ type: 'resumed' })); } catch(e) {}
+    }
     if (isStreaming) {
       try {
         log('re-acquiring camera after visibility change');
@@ -1000,12 +1036,7 @@ document.addEventListener('visibilitychange', async function(){
           log('replaceTrack done');
           await applyBitrate();
         }
-        if (ctl && ctl.readyState === 'open') {
-          try {
-            ctl.send(JSON.stringify({ type: 'resumed' }));
-            sendCaps();
-          } catch(e) {}
-        }
+        sendCaps();
         log('visibility change: sending ICE restart re-offer');
         await iceRestart();
       } catch(e) {
