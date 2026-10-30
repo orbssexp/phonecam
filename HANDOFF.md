@@ -45,3 +45,8 @@ phonecam-core DONE (9135fe5): 40 tests, clippy clean, iOS check ok (verified by 
 
 ## Previous next step
 Relay DNS live → user runs the relay command and scans the QR on the iPhone → record checkpoints 5–6 → update the spec → write the plan.
+
+## Update 2026-10-30 (round 1 merged)
+- main c732a57+: phonecam-transport (NACK fix, interface watch, pairing), phonecam-media-win (fixed-size vcam, letterbox, placeholders), apps/web-client + apps/relay. Workspace tests + clippy clean. Pushed (Vercel redeploys apps/web-client). Relay unchanged, no redeploy.
+- Round 2 running: D1 Sonnet (apps/desktop/src-tauri, worktree phonecam-wt-desktop), D2 agy (React UI, phonecam-wt-ui, log ../agy-ui.log), D3 agy (page caps/set, phonecam-wt-web2, log ../agy-web2.log). Contract: plans/2026-10-30-mvp-contracts.md "D contract detail".
+- Next: verify each → merge D1, D2, D3 → `npm run tauri build` → user installs + tests on iPhone + Zoom.
