@@ -87,3 +87,16 @@ iPhone on iOS 18.7, Safari 27 → Cloudflare relay (signaling) → spike-rx `--r
   - **No `torch`** on the front camera, which is expected. Still to do: the rear camera (torch, lens list) and pressing the zoom/torch buttons.
 - **Checkpoint 7: superseded.** Relay mode with the page on Vercel removes the local CA requirement for phase 1.
 - **Checkpoint 5:** still pending (Wi-Fi → USB).
+
+## Real iPhone run #2: camera controls (2026-10-30)
+Same setup (iOS 18.7, relay mode, page with live switching through `replaceTrack`).
+- **Lenses reported:** Front Camera, Back Dual Wide Camera, Back Ultra Wide Camera, Back Camera. There is no telephoto on this model.
+- **Back Dual Wide reports `zoom` 0.5–10**, so one virtual device covers ultra-wide through digital 10×, like the native Camera app. This is the best default for pinch-to-zoom.
+- **Live lens switching without renegotiation: PASS.** Each switch took about 1 s, sometimes with a short fps dip.
+- **Resolution switching: PASS.** 1080p30, 720p30 and **4K30 (3840x2160 at 30 fps, sustained)** all work in Safari. The PC decoded 4K30 on D3D11VA.
+- **`torch` on the rear cameras: PASS.** `applyConstraints({torch})` toggles reliably.
+- **`zoom` 1→2.5→1: PASS.**
+- **Packet loss on Wi-Fi:** GAP events happened about every 30–60 s, with an ingress loss fraction of 0.4–3.6%. Each was recovered by PLI, with the keyframe arriving in 188–593 ms, but each causes a visible freeze of up to 1 s (sender fps dipped to 2–6). **nacks=0 throughout, so NACK/RTX is the top Round 1 fix for perceived stability.**
+- **Checkpoint 5 (Wi-Fi → USB): NOT OBSERVED.** There was one nominated pair (Wi-Fi) for the whole session, with no ICE restart, no new pair and no interruption in ingress. Needs a dedicated re-run.
+- **Interruption:** the page logged `track muted` near the end and stopped reporting stats, but ingress packets and keyframes kept arriving at the same rate. Needs a dedicated re-run with notes on what was done (call vs. lock vs. app switch).
+- **RAM:** the process showed about 226 MB working set after 4K decode plus three softcam re-creations, against 45 MB at 1080p in the earlier measurement. Re-measure at fixed 1080p and fixed 4K.
