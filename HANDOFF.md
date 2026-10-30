@@ -28,5 +28,20 @@ Updated: 2026-10-30
 - Route grep, log reading and metric parsing to `agy` (token-economy §1). Subagents decline agy's skip-permissions flag when relayed, so run agy from the main session. `agy -p` sometimes returns empty output; check it and fall back to doing the work directly.
 - Stray worktree `C:\Users\gusta\orca\workspaces\phone-cam\redfish` (branch `zxgusst/redfish`, at the initial commit) belongs to another tool. It was not pushed; don't touch it.
 
+## Update 2026-10-30 (later)
+- iPhone tests (results in `docs/spike-results.md`):
+  - Live lens/resolution switching works, and so do 4K30, torch, and zoom 0.5–10 on Back Dual Wide.
+  - Wi-Fi-off did NOT fail over: the spike has no failover. This is now a Round 1 requirement.
+- Decisions:
+  - Decoder: **always NVIDIA when available** (user choice B).
+  - Vercel + Cloudflare relay replaces the local CA; the spec is revised (a9a458b).
+  - The user delegates technical decisions (see memory).
+- Plan 1 of 5 written: `docs/superpowers/plans/2026-10-30-phonecam-core.md` (portable core, 9 TDD tasks, 40 tests). It was reviewed and the fixes are applied (e6c0518).
+- Next plans: transport → decode/vcam → web-client + relay → desktop UI.
+- Still blocked on the user: `regsvr32` (admin) to make "PhoneCam" visible in apps.
+
 ## Next step
+Execute the phonecam-core plan with superpowers:subagent-driven-development (1 task at a time: Sonnet implementer + review), then write the transport plan.
+
+## Previous next step
 Relay DNS live → user runs the relay command and scans the QR on the iPhone → record checkpoints 5–6 → update the spec → write the plan.
