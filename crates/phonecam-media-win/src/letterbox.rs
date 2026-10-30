@@ -146,9 +146,36 @@ pub fn blit_subrectangle_bgr(
     }
 }
 
+/// Flips a packed BGR24 image horizontally, in place.
+pub fn mirror_bgr_in_place(buf: &mut [u8], w: u32, h: u32) {
+    let (w, h) = (w as usize, h as usize);
+    if buf.len() < w * h * 3 {
+        return;
+    }
+    for row in buf.chunks_exact_mut(w * 3).take(h) {
+        for x in 0..w / 2 {
+            let (a, b) = (x * 3, (w - 1 - x) * 3);
+            for c in 0..3 {
+                row.swap(a + c, b + c);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirror_flips_each_row_and_is_an_involution() {
+        let orig: Vec<u8> = (0..6u8).flat_map(|i| [i, i, i]).collect();
+        let mut b = orig.clone();
+        mirror_bgr_in_place(&mut b, 3, 2);
+        let firsts: Vec<u8> = b.chunks(3).map(|p| p[0]).collect();
+        assert_eq!(firsts, vec![2, 1, 0, 5, 4, 3]);
+        mirror_bgr_in_place(&mut b, 3, 2);
+        assert_eq!(b, orig);
+    }
 
     #[test]
     fn test_zero_dimensions() {

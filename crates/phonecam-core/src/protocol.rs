@@ -34,6 +34,12 @@ pub enum PauseReason {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LensInfo {
+    pub id: String,
+    pub label: String,
+}
+
 /// Control messages on the `ctl` DataChannel. Spec §14.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -53,6 +59,8 @@ pub enum Ctl {
     },
     Paused { reason: PauseReason },
     Resumed,
+    /// Phone to desktop on DC open and after every lens switch.
+    Caps { lenses: Vec<LensInfo>, current: String, zoom_min: f32, zoom_max: f32, torch: bool },
 }
 
 #[cfg(test)]
@@ -98,6 +106,25 @@ mod tests {
         assert_eq!(p, Ctl::Pong { t: 5, battery: Some(0.8), charging: Some(true) });
         let z: Ctl = serde_json::from_str(r#"{"type":"paused","reason":"call"}"#).unwrap();
         assert_eq!(z, Ctl::Paused { reason: PauseReason::Call });
+    }
+
+    #[test]
+    fn caps_round_trips() {
+        let j = r#"{"type":"caps","lenses":[{"id":"a","label":"Back"}],"current":"a","zoom_min":1.0,"zoom_max":10.0,"torch":true}"#;
+        let c: Ctl = serde_json::from_str(j).unwrap();
+        assert_eq!(
+            c,
+            Ctl::Caps {
+                lenses: vec![LensInfo { id: "a".into(), label: "Back".into() }],
+                current: "a".into(),
+                zoom_min: 1.0,
+                zoom_max: 10.0,
+                torch: true
+            }
+        );
+        assert_eq!(serde_json::to_string(&c).unwrap(), j);
+        let k: Ctl = serde_json::from_str(r#"{"type":"caps","lenses":[],"current":"","zoom_min":1,"zoom_max":10,"torch":false}"#).unwrap();
+        assert!(matches!(k, Ctl::Caps { zoom_max, .. } if zoom_max == 10.0));
     }
 
     #[test]

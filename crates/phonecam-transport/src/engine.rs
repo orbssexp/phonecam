@@ -674,7 +674,7 @@ impl Engine {
             }
             Ctl::Paused { reason } => self.conn_event(ConnEvent::CameraPaused(*reason)),
             Ctl::Resumed => self.conn_event(ConnEvent::CameraResumed),
-            Ctl::Set { .. } => {}
+            Ctl::Set { .. } | Ctl::Caps { .. } => {}
         }
         self.emit(TransportEvent::Ctl(c));
     }

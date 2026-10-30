@@ -6,3 +6,6 @@ spike/*.log
 spike/*.csv
 spike/*.log
 spike/*.csv
+apps/desktop/dist/
+apps/desktop/src-tauri/vendor/
+apps/desktop/src-tauri/gen/

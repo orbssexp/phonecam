@@ -11,4 +11,4 @@ pub mod protocol;
 
 pub use conn::{Action, Conn, ConnState, Event, VcamFrame};
 pub use controls::{Profile, VideoMode};
-pub use protocol::{Ctl, PauseReason, Role, Signal, PROTOCOL_VERSION};
+pub use protocol::{Ctl, LensInfo, PauseReason, Role, Signal, PROTOCOL_VERSION};

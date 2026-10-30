@@ -137,6 +137,7 @@ pub struct Au {
 enum MediaMsg {
     Au(Au),
     SetFrame(VcamFrame),
+    SetDecoder(DecoderPref),
     Shutdown,
 }
 
@@ -252,6 +253,7 @@ pub struct MediaHandle {
     stats: Arc<Mutex<StatsState>>,
     latest_frame: Arc<Mutex<Option<LatestFrame>>>,
     shutdown_flag: Arc<AtomicBool>,
+    mirror: Arc<AtomicBool>,
     worker_thread: Option<JoinHandle<()>>,
 }
 
@@ -273,6 +275,17 @@ impl MediaHandle {
     /// Updates what the "PhoneCam" virtual camera outputs (spec §7.3).
     pub fn set_frame(&self, frame: VcamFrame) {
         let _ = self.tx.send(MediaMsg::SetFrame(frame));
+    }
+
+    /// Horizontally flips the camera output (applied after letterboxing). Takes effect on the next frame.
+    pub fn set_mirror(&self, on: bool) {
+        self.mirror.store(on, Ordering::Relaxed);
+    }
+
+    /// Switches the decoder preference at runtime. The softcam device is kept; only the
+    /// decoder is torn down and lazily re-opened on the next AU.
+    pub fn set_decoder(&self, pref: DecoderPref) {
+        let _ = self.tx.send(MediaMsg::SetDecoder(pref));
     }
 
     /// Returns the latest frame encoded as JPEG, downscaled to `max_w` if wider.
@@ -330,6 +343,8 @@ impl Media {
         let stats_clone = Arc::clone(&stats);
         let latest_clone = Arc::clone(&latest_frame);
         let shutdown_clone = Arc::clone(&shutdown_flag);
+        let mirror = Arc::new(AtomicBool::new(false));
+        let mirror_clone = Arc::clone(&mirror);
 
         let worker_thread = thread::Builder::new()
             .name("phonecam-media".to_string())
@@ -342,6 +357,7 @@ impl Media {
                     stats_clone,
                     latest_clone,
                     shutdown_clone,
+                    mirror_clone,
                 );
             })
             .expect("failed to spawn media thread");
@@ -351,8 +367,17 @@ impl Media {
             stats,
             latest_frame,
             shutdown_flag,
+            mirror,
             worker_thread: Some(worker_thread),
         }
+    }
+}
+
+fn decoder_chain(pref: DecoderPref) -> Vec<i32> {
+    match pref {
+        DecoderPref::Auto | DecoderPref::D3d11va => vec![1, 3, 0],
+        DecoderPref::Cuda => vec![2, 0],
+        DecoderPref::Cpu => vec![0],
     }
 }
 
@@ -377,6 +402,7 @@ fn update_latest_frame(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_media_loop(
     rx: Receiver<MediaMsg>,
     decoder_pref: DecoderPref,
@@ -385,7 +411,9 @@ fn run_media_loop(
     stats: Arc<Mutex<StatsState>>,
     latest_frame: Arc<Mutex<Option<LatestFrame>>>,
     shutdown_flag: Arc<AtomicBool>,
+    mirror: Arc<AtomicBool>,
 ) {
+    let mut decoder_pref = decoder_pref;
     let cam = SoftcamCamera::new(out_w, out_h);
 
     let mut out_buf = vec![0u8; (out_w * out_h * 3) as usize];
@@ -399,12 +427,7 @@ fn run_media_loop(
     update_latest_frame(&latest_frame, out_w, out_h, &out_buf);
 
     let mut dec: Option<DecWrapper> = None;
-    let chain: Vec<i32> = match decoder_pref {
-        DecoderPref::Auto => vec![1, 3, 0],
-        DecoderPref::D3d11va => vec![1, 3, 0],
-        DecoderPref::Cuda => vec![2, 0],
-        DecoderPref::Cpu => vec![0],
-    };
+    let mut chain = decoder_chain(decoder_pref);
     let mut ci = 0;
     let mut scaler: Option<ScalerWrapper> = None;
     let mut decode_errors = 0;
@@ -429,6 +452,17 @@ fn run_media_loop(
 
         match msg {
             Some(MediaMsg::Shutdown) => break,
+            Some(MediaMsg::SetDecoder(pref)) => {
+                if pref != decoder_pref {
+                    decoder_pref = pref;
+                    chain = decoder_chain(pref);
+                    ci = 0;
+                    dec = None;
+                    scaler = None;
+                    decode_errors = 0;
+                    total_frames_decoded = 0;
+                }
+            }
             Some(MediaMsg::SetFrame(new_frame)) => {
                 if current_vcam_frame != new_frame {
                     current_vcam_frame = new_frame;
@@ -536,6 +570,9 @@ fn run_media_loop(
                                 s.scale(dec_buf.as_ptr(), w * 3, dst_ptr, dst_stride, h);
                             }
 
+                            if mirror.load(Ordering::Relaxed) {
+                                letterbox::mirror_bgr_in_place(&mut out_buf, out_w, out_h);
+                            }
                             cam.send_frame(&out_buf);
                             update_latest_frame(&latest_frame, out_w, out_h, &out_buf);
                             last_tick = Instant::now();
