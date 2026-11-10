@@ -5,6 +5,8 @@
 //   2 = cuda / nvdec
 //   3 = d3d11va on default adapter (any GPU)
 #define COBJMACROS
+#include <windows.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -185,6 +187,12 @@ int dec_decode(void *h, const uint8_t *data, int len, uint8_t *out, int maxsize,
         av_frame_unref(d->frame);
     }
     return produced;
+}
+
+// Called after the decoder is torn down: return freed heap pages and trim the working set.
+void dec_trim_memory(void) {
+    _heapmin();
+    K32EmptyWorkingSet(GetCurrentProcess());
 }
 
 void *scaler_create(int src_w, int src_h, int dst_w, int dst_h) {

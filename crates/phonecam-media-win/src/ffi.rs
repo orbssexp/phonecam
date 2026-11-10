@@ -4,6 +4,8 @@ extern "C" {
     pub fn dec_create(mode: i32, err: *mut c_char, errlen: i32) -> *mut c_void;
     pub fn dec_name(h: *mut c_void) -> *const c_char;
     pub fn dec_destroy(h: *mut c_void);
+    /// Give freed heap pages back to the OS and trim the working set.
+    pub fn dec_trim_memory();
     pub fn dec_decode(
         h: *mut c_void,
         data: *const u8,
