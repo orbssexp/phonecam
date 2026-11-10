@@ -69,6 +69,7 @@ const PAUSE_LABEL: Record<NonNullable<AppState["pauseReason"]>, string> = {
 const PROFILE_LABEL: Record<Profile, string> = {
   economy: "Economy 720p",
   balanced: "Balanced 1080p",
+  smooth: "Smooth 1080p 60 (app)",
   quality: "Quality 4K",
 };
 

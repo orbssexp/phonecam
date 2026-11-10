@@ -5,7 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type ConnState = "idle" | "connecting" | "live" | "paused" | "reconnecting";
 export type PauseReason = "call" | "background" | "locked" | "unknown";
 export type PathKind = "lan" | "usb";
-export type Profile = "economy" | "balanced" | "quality";
+export type Profile = "economy" | "balanced" | "smooth" | "quality";
 export type DecoderKind = "auto" | "cuda" | "cpu";
 export type Rotation = 0 | 90 | 180 | 270;
 
