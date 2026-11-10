@@ -50,3 +50,11 @@ Relay DNS live → user runs the relay command and scans the QR on the iPhone �
 - main c732a57+: phonecam-transport (NACK fix, interface watch, pairing), phonecam-media-win (fixed-size vcam, letterbox, placeholders), apps/web-client + apps/relay. Workspace tests + clippy clean. Pushed (Vercel redeploys apps/web-client). Relay unchanged, no redeploy.
 - Round 2 running: D1 Sonnet (apps/desktop/src-tauri, worktree phonecam-wt-desktop), D2 agy (React UI, phonecam-wt-ui, log ../agy-ui.log), D3 agy (page caps/set, phonecam-wt-web2, log ../agy-web2.log). Contract: plans/2026-10-30-mvp-contracts.md "D contract detail".
 - Round 2 merged (4b1cc4d+). Installer built: target/release/bundle/nsis/PhoneCam_0.1.0_x64-setup.exe (41.6 MB). Next: user installs + tests (iPhone, Zoom, Wi-Fi off → USB, call/lock). agy quota out until ~2026-11-05 → Haiku fallback.
+
+## Update 2026-11-10 (finalization)
+- Installed build (e2cd178, TLS fix) validated end to end with `scripts/dev/e2e.sh` (headless fake phone, temp profile): relay connects, video decodes, vcam frame 1920x1080, "Reconnecting…" placeholder after phone leaves, tray mode works, CPU 0.8% at 1080p30.
+- Found: vcam is named "DirectShow Softcam" (not "PhoneCam"); memory 59 MB idle → 205 MB after first session, never released; UI: "No path"/no latency while live, right panel scrolls, no QR while reconnecting.
+- Running (worktrees ../phonecam-wt-f1-ui, -f2-vcam, -f3-engine; branches fin/*): F1 agy UI (log ../agy-f1.log), F2 agy softcam rename → spike/vendor/softcam-phonecam (log ../agy-f2.log), F3 Sonnet memory + path diagnosis. Contracts: plans/2026-10-30-mvp-contracts.md "Finalization round".
+- Next: verify each → merge → `cd apps/desktop && npm run tauri build` → user reinstalls (admin; re-registers the camera as "PhoneCam") → rerun e2e with CAM=PhoneCam → user tests with the real iPhone.
+- `git stash@{0}` holds a stray duplicate `Profile` in core/controls.rs written by a resumed old agent; it breaks the build — drop it, don't apply.
+- agy quota is back (checked 2026-11-10). User rule: stop and hand off before the session passes 70% usage.
