@@ -187,3 +187,47 @@ output above 1080p, USB via usbmuxd, stream encryption.
 - desktop proof = HMAC-SHA256(k, ASCII `phonecam-native-v1|desktop|` + ph + pc) =
   `f51ff1c09a94749e1864debc1047e5fc55e7c5109055c954df8c1b41e87f818f`
 - `profile` strings in `set`: `economy`, `balanced`, `quality` (4K30), `smooth` (1080p60, alias `fps60`).
+
+## Round H-fix (2026-11-10) — first real run of the native app (target version 0.2.0)
+
+Evidence (`phonecam.log`, user's session): native connects and real 3840x2160 was decoded, but
+(1) 14 s after switching to 4K the phone closed the TCP connection (os error 10054) and came back
+on a different port (listener was recreated, or the app restarted);
+(2) after lock/unlock (`paused: Background`) the PC re-authenticates but no keyframe ever arrives
+(no `[native] live`), for minutes;
+(3) repeated `could not connect/authenticate` every ~3 s for up to 50 s while the phone is still
+advertised; (4) the desktop restarted its receiver 5 times within one second (22:53:34-35), and the
+relay then answered 409 Conflict; (5) user says 4K picture quality is very poor; (6) connecting
+takes long.
+
+### HF1 — iOS (Sonnet; apps/ios; CI is the compile check)
+- A newly authenticated desktop connection REPLACES the current one (never refuse because one
+  exists). Drop a connection with no inbound ping for 6 s. Keep the listener on its port across
+  reconfigures and foreground/background; recreate it only if it failed.
+- On return to foreground / interruption ended: restart capture and encoder, then `resumed`, fresh
+  `caps`, and a keyframe. A `keyframe` request must always produce one, also right after a
+  reconfigure, and encoding must be running whenever a desktop is authenticated.
+- Find why the connection closed ~14 s after switching to 4K (backpressure path, encoder session
+  recreation, memory) and make profile switches safe: tear down and rebuild the compression session
+  on a size change, never block the capture queue on the socket.
+- Quality: make sure the bitrate targets really apply (AverageBitRate plus DataRateLimits ~1.5x,
+  ExpectedFrameRate, High AutoLevel, real-time; no quality-reducing preset left on); 4K30 target
+  30 Mbps. Add `bitrate_kbps` measured over the last second to the status line.
+- Show the app version (CFBundleShortVersionString = 0.2.0) and a small scrollable debug log
+  (last ~50 events: listen, connect, auth, set, reconfigure, drop, close reason) on a second screen
+  or sheet. Never log `k`.
+
+### HF2 — desktop (Sonnet; transport native.rs, src-tauri, media-win only if needed)
+- Find and remove the cause of the 5 receiver restarts in one second (settings writes or network
+  interface events must not restart it when nothing relevant changed; debounce); make shutdown of
+  the old relay/native worker complete before the new one starts (no 409).
+- Native connect: try every advertised address (IPv4 first), 1.5 s connect timeout each, retry
+  quickly (0.5 s, 1 s, 2 s cap while the service is visible); log the precise failure (connect
+  timeout / refused / handshake step) instead of "could not connect/authenticate".
+- After auth, if no keyframe within 1.5 s request one, and repeat every 1.5 s until live.
+- `[stats]`/`[media]` lines for native: received kbps, average AU size, keyframes. AppState gains
+  `bitrateKbps` and `source` ("native" | "web"); show both in the UI stream rows, and the app
+  version in the footer.
+- Check the 4K -> 1080p downscale path used for the virtual camera and preview uses a proper filter
+  (bilinear or better, not nearest) and report what it is.
+- Bump the desktop version to 0.2.0 (tauri.conf.json, Cargo.toml, package.json).
