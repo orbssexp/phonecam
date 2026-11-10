@@ -44,6 +44,12 @@ impl Heartbeat {
         self.rtt_ms
     }
 
+    /// Live media arrived: proves the link without touching the ping schedule, so pings (and
+    /// therefore RTT samples) keep flowing while video is live.
+    pub fn alive(&mut self) {
+        self.outstanding = 0;
+    }
+
     pub fn reset(&mut self, now_ms: u64) {
         self.outstanding = 0;
         self.next_ping_at = now_ms + self.interval_ms;
@@ -82,6 +88,15 @@ mod tests {
         assert_eq!(h.tick(6_000), Some(HbAction::SendPing { t: 6_000 }));
         assert_eq!(h.tick(8_000), Some(HbAction::SendPing { t: 8_000 }));
         assert_eq!(h.tick(10_000), Some(HbAction::Lost));
+    }
+
+    #[test]
+    fn alive_keeps_pinging_but_never_loses() {
+        let mut h = Heartbeat::new(2_000, 3, 0);
+        for i in 1..=10u64 {
+            h.alive();
+            assert_eq!(h.tick(i * 2_000), Some(HbAction::SendPing { t: i * 2_000 }));
+        }
     }
 
     #[test]

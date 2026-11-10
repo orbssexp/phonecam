@@ -299,7 +299,7 @@ impl Engine {
             // Live media proves the path even if pongs are late.
             if self.last_media_rx.is_some_and(|t| now.duration_since(t) < Duration::from_millis(HB_INTERVAL_MS)) {
                 if let Some(hb) = self.hb.as_mut() {
-                    hb.reset(ms);
+                    hb.alive();
                 }
             }
             let act = self.hb.as_mut().and_then(|hb| hb.tick(ms));
@@ -610,6 +610,8 @@ impl Engine {
                             s.last_pair = Some(pair);
                         }
                         let kind = self.socks.kind_of(p.local.addr).unwrap_or_else(|| match p.local.addr.ip() {
+                            // Same-host phone (test harness, loopback): a working direct path, shown as LAN.
+                            std::net::IpAddr::V4(ip) if ip.is_loopback() => PathKind::Lan,
                             std::net::IpAddr::V4(ip) => classify("", ip),
                             _ => PathKind::Ignore,
                         });
@@ -644,8 +646,8 @@ impl Engine {
 
     fn maybe_path_event(&mut self, force: bool, ice_rtt: Option<u32>) {
         let Some(kind) = self.current_path else { return };
-        let rtt = self.hb.as_ref().and_then(|h| h.rtt_ms()).map(|r| r as u32).or(ice_rtt).unwrap_or(0);
-        let moved = self.last_path_event.is_none_or(|(k, r)| k != kind || r.abs_diff(rtt) >= 5);
+        let rtt = self.hb.as_ref().and_then(|h| h.rtt_ms()).map(|r| (r as u32).max(1)).or(ice_rtt).unwrap_or(0);
+        let moved = self.last_path_event.is_none_or(|(k, r)| k != kind || (r == 0) != (rtt == 0) || r.abs_diff(rtt) >= 5);
         let due = self.last_path_at.elapsed() >= Duration::from_secs(2);
         if force || (moved && due) {
             if self.last_path_event != Some((kind, rtt)) {
