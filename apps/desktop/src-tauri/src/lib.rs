@@ -252,8 +252,8 @@ fn open_window(app: &AppHandle) {
     }
     let built = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::default())
         .title("PhoneCam")
-        .inner_size(900.0, 600.0)
-        .min_inner_size(720.0, 480.0)
+        .inner_size(1000.0, 720.0)
+        .min_inner_size(900.0, 640.0)
         .build();
     match built {
         Ok(w) => {

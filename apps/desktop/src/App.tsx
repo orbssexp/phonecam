@@ -79,7 +79,7 @@ function useAppState(): AppState | null {
 }
 
 /** Polls the preview at <= 15 fps, only while the document is visible and the connection is live. */
-function usePreview(active: boolean): string | null {
+function usePreview(active: boolean, reset: boolean): string | null {
   const [src, setSrc] = useState<string | null>(null);
   const [visible, setVisible] = useState(() => document.visibilityState === "visible");
 
@@ -90,8 +90,13 @@ function usePreview(active: boolean): string | null {
   }, []);
 
   useEffect(() => {
-    if (!active || !visible) {
+    if (reset) {
       setSrc(null);
+    }
+  }, [reset]);
+
+  useEffect(() => {
+    if (!active || !visible) {
       return;
     }
     let alive = true;
@@ -122,7 +127,8 @@ function usePreview(active: boolean): string | null {
 export default function App() {
   const state = useAppState();
   const live = state?.conn === "live";
-  const frame = usePreview(live);
+  const shouldResetPreview = state?.conn === "idle" || state?.conn === "connecting";
+  const frame = usePreview(live, shouldResetPreview);
 
   if (!state) {
     return (
@@ -132,17 +138,19 @@ export default function App() {
     );
   }
 
-  const showQr = state.conn === "idle" || state.conn === "connecting";
+  const showQr = state.conn === "idle" || state.conn === "connecting" || state.conn === "reconnecting";
+  const showPreview = (state.conn === "live" || state.conn === "paused") && Boolean(frame);
+  const showWaiting = state.conn === "live" && !frame;
 
   return (
-    <div className="flex h-full min-h-[600px] min-w-[900px] gap-4 p-4">
-      {/* Left: QR or live preview */}
-      <section className="flex min-w-0 flex-1 flex-col gap-3">
+    <div className="flex h-full min-w-[900px] gap-3 px-3 py-2.5">
+      {/* Left: QR or live/paused preview */}
+      <section className="flex min-w-0 flex-1 flex-col gap-2.5">
         <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-border bg-black">
           {showQr && (
-            <div className="flex flex-col items-center gap-4 p-6">
+            <div className="flex flex-col items-center gap-3 p-4">
               <div
-                className="size-[300px] rounded-md bg-white p-3 [&>svg]:size-full"
+                className="size-[280px] max-h-[50vh] max-w-[50vh] rounded-md bg-white p-3 [&>svg]:size-full"
                 role="img"
                 aria-label="Pairing QR code"
                 dangerouslySetInnerHTML={{ __html: state.qrSvg }}
@@ -150,31 +158,34 @@ export default function App() {
               <p className="text-center text-[13px] text-muted-foreground">
                 {state.conn === "connecting"
                   ? "Waiting for the phone. Scan the code with the phone camera."
+                  : state.conn === "reconnecting"
+                  ? "Scan again if the page was closed."
                   : "Scan this code with the phone to connect."}
               </p>
             </div>
           )}
 
-          {live && frame && <img src={frame} alt="Camera preview" className="size-full object-contain" />}
-          {live && !frame && (
+          {showPreview && <img src={frame!} alt="Camera preview" className="size-full object-contain" />}
+          {showWaiting && (
             <div className="flex items-center gap-2 text-muted-foreground">
               <LoaderCircle className="size-4 animate-spin" /> Waiting for first frame
             </div>
           )}
 
-          {(state.conn === "paused" || state.conn === "reconnecting") && (
-            <div className="absolute inset-x-0 top-3 flex justify-center">
-              <div className="flex h-8 items-center gap-2 rounded-full bg-black/70 px-3 text-[13px] text-white">
-                {state.conn === "paused" ? (
-                  <Pause className="size-4" aria-hidden />
-                ) : (
-                  <RefreshCw className="size-4 animate-spin" aria-hidden />
-                )}
-                <span>
-                  {state.conn === "paused"
-                    ? PAUSE_LABEL[state.pauseReason ?? "unknown"]
-                    : "Reconnecting to phone"}
-                </span>
+          {state.conn === "reconnecting" && (
+            <div className="absolute inset-x-0 top-3 flex justify-center px-4">
+              <div className="flex h-8 max-w-full items-center gap-2 rounded-full bg-black/80 px-3 text-[13px] text-white shadow-md">
+                <RefreshCw className="size-4 shrink-0 animate-spin" aria-hidden />
+                <span className="truncate">Reconnecting… scan again if the page was closed</span>
+              </div>
+            </div>
+          )}
+
+          {state.conn === "paused" && (
+            <div className="absolute inset-x-0 top-3 flex justify-center px-4">
+              <div className="flex h-8 max-w-full items-center gap-2 rounded-full bg-black/80 px-3 text-[13px] text-white shadow-md">
+                <Pause className="size-4 shrink-0" aria-hidden />
+                <span className="truncate">{PAUSE_LABEL[state.pauseReason ?? "unknown"]}</span>
               </div>
             </div>
           )}
@@ -193,7 +204,7 @@ export default function App() {
       </section>
 
       {/* Right: cards */}
-      <aside className="flex w-[300px] shrink-0 flex-col gap-3 overflow-y-auto">
+      <aside className="flex w-[290px] shrink-0 flex-col gap-2 overflow-y-auto">
         <ConnectionCard state={state} />
         <CameraCard state={state} />
         <DecoderCard state={state} />
@@ -361,8 +372,8 @@ function DecoderCard({ state }: { state: AppState }) {
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-[13px] text-muted-foreground">{label}</span>
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[12px] font-medium text-muted-foreground">{label}</span>
       {children}
     </div>
   );
@@ -370,7 +381,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex min-h-[28px] items-center justify-between gap-3">
+    <div className="flex min-h-[28px] items-center justify-between gap-3 text-[13px]">
       <span className="text-muted-foreground">{label}</span>
       <span className="text-right">{children}</span>
     </div>
@@ -391,10 +402,10 @@ function SwitchRow({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <div className="flex min-h-[28px] items-center justify-between gap-3">
+    <div className="flex min-h-[28px] items-center justify-between gap-3 text-[13px]">
       <div className="flex flex-col">
         <span>{label}</span>
-        {hint && <span className="text-[12px] text-muted-foreground">{hint}</span>}
+        {hint && <span className="text-[11px] leading-tight text-muted-foreground">{hint}</span>}
       </div>
       <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} aria-label={label} />
     </div>
