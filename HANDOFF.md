@@ -58,3 +58,10 @@ Relay DNS live → user runs the relay command and scans the QR on the iPhone �
 - Next: verify each → merge → `cd apps/desktop && npm run tauri build` → user reinstalls (admin; re-registers the camera as "PhoneCam") → rerun e2e with CAM=PhoneCam → user tests with the real iPhone.
 - `git stash@{0}` holds a stray duplicate `Profile` in core/controls.rs written by a resumed old agent; it breaks the build — drop it, don't apply.
 - agy quota is back (checked 2026-11-10). User rule: stop and hand off before the session passes 70% usage.
+
+## Update 2026-11-10 (finalization merged)
+- main: F1 UI (QR while reconnecting, panel fits 1000x720), F2 vcam renamed "PhoneCam" (new CLSID {4CD75097-5A06-4341-9D29-8C12662AC2C0}, vendor dir spike/vendor/softcam-phonecam, `scripts/build-softcam.ps1`), F3 decoder released 3 s after stream stops + heartbeat ping fix (latency), battery % fix. 80 tests pass, clippy clean.
+- New build tested from target/release with temp APPDATA: idle 52 MB; live 1080p30 window open 115 MB, 1.85% CPU; 12 s after phone leaves 20 MB. UI shows Wi-Fi / 1 ms / d3d11va NVIDIA; QR returns on reconnecting.
+- Installer rebuilt: target/release/bundle/nsis/PhoneCam_0.1.0_x64-setup.exe. NOT yet installed by the user.
+- Blocked on user: uninstall the old PhoneCam (unregisters "DirectShow Softcam"), install the new one (admin), then: `CAM=PhoneCam bash scripts/dev/e2e.sh` must grab a frame; then real-iPhone tests (lenses/zoom/torch from PC, lock/call recovery, Wi-Fi off → USB).
+- User's settings.json has decoder "cuda" (≈205 MB); "auto" is lighter (≈110 MB) and still NVIDIA.
