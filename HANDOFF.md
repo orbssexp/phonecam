@@ -65,3 +65,8 @@ Relay DNS live → user runs the relay command and scans the QR on the iPhone �
 - Installer rebuilt: target/release/bundle/nsis/PhoneCam_0.1.0_x64-setup.exe. NOT yet installed by the user.
 - Blocked on user: uninstall the old PhoneCam (unregisters "DirectShow Softcam"), install the new one (admin), then: `CAM=PhoneCam bash scripts/dev/e2e.sh` must grab a frame; then real-iPhone tests (lenses/zoom/torch from PC, lock/call recovery, Wi-Fi off → USB).
 - User's settings.json has decoder "cuda" (≈205 MB); "auto" is lighter (≈110 MB) and still NVIDIA.
+
+## Update 2026-11-10 (real iPhone connects)
+- Root cause of "phone live / desktop reconnecting": no inbound firewall rule for phonecam.exe on a Public network. Installer now adds it (netsh, UDP in) and swaps an in-use softcam.dll by renaming it (no need to close Brave etc.). User reinstalled over the old one → iPhone connects, vcam "PhoneCam" registered.
+- User-found bugs, now "Round G" in plans/2026-10-30-mvp-contracts.md: sideways video + no rotate control; 4K shows 1080; unstable/disconnects; fps display wrong (60). App has NO log file yet → G1 adds %APPDATA%\PhoneCam\phonecam.log; instability can only be diagnosed from that log after the user's next real session.
+- Next: G1 Sonnet (engine), G2 agy (UI), G3 agy (page) in worktrees ../phonecam-wt-g1..g3 (branches fin/g1-engine, fin/g2-ui, fin/g3-page) → verify (tests, clippy, scripts/dev/e2e.sh with CAM=PhoneCam) → merge → `npm run tauri build` → user reinstalls over the top → user tests → read phonecam.log for disconnect causes.
