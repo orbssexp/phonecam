@@ -8,11 +8,12 @@ mod state;
 use base64::Engine;
 use phonecam_core::Ctl;
 use phonecam_media_win::{Media, MediaHandle};
+use phonecam_transport::native::{NativeHandle, NativeReceiver};
 use phonecam_transport::{Config, Receiver, ReceiverHandle, TransportEvent};
 use settings::{Diff, Pairing, Settings, SettingsPatch};
 use state::{AppState, View};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -31,6 +32,7 @@ struct Inner {
     pairing: Pairing,
     view: View,
     recv: Option<ReceiverHandle>,
+    native: Option<NativeHandle>,
     phone_url: String,
     qr_svg: String,
 }
@@ -46,8 +48,14 @@ pub struct Shared {
     cvo: AtomicI32,
     /// Rotation hint from the phone's caps, used only while `cvo` is -1.
     rot_hint: AtomicU32,
+    /// Which source owns the session (`SRC_*`): the first to authenticate, native preferred.
+    active: AtomicU8,
     inner: Mutex<Inner>,
 }
+
+const SRC_NONE: u8 = 0;
+const SRC_WEBRTC: u8 = 1;
+const SRC_NATIVE: u8 = 2;
 
 impl Shared {
     fn new() -> Arc<Self> {
@@ -67,11 +75,13 @@ impl Shared {
             generation: AtomicU64::new(0),
             cvo: AtomicI32::new(-1),
             rot_hint: AtomicU32::new(0),
+            active: AtomicU8::new(SRC_NONE),
             inner: Mutex::new(Inner {
                 settings,
                 pairing,
                 view: View::default(),
                 recv: None,
+                native: None,
                 phone_url: String::new(),
                 qr_svg: String::new(),
             }),
@@ -89,6 +99,10 @@ impl Shared {
         if let Some(old) = inner.recv.take() {
             old.shutdown();
         }
+        if let Some(old) = inner.native.take() {
+            old.shutdown();
+        }
+        self.active.store(SRC_NONE, Ordering::SeqCst);
         let cfg = Config {
             relay_url: self.relay_url.clone(),
             page_url: self.page_url.clone(),
@@ -106,6 +120,8 @@ impl Shared {
             "[app] starting receiver for room {}...",
             inner.pairing.room_id.chars().take(6).collect::<String>()
         );
+        let (nhandle, nrx) = NativeReceiver::start(inner.pairing.secret());
+        inner.native = Some(nhandle);
         let (handle, rx) = Receiver::start(cfg);
         inner.recv = Some(handle);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -113,16 +129,82 @@ impl Shared {
         let me = Arc::clone(self);
         std::thread::Builder::new()
             .name("phonecam-events".into())
-            .spawn(move || me.event_loop(rx, generation))
+            .spawn(move || me.event_loop(rx, generation, SRC_WEBRTC))
             .expect("spawn event thread");
+        let me = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("phonecam-native-events".into())
+            .spawn(move || me.event_loop(nrx, generation, SRC_NATIVE))
+            .expect("spawn native event thread");
     }
 
-    fn event_loop(&self, mut rx: EventRx<TransportEvent>, generation: u64) {
+    fn event_loop(&self, mut rx: EventRx<TransportEvent>, generation: u64, src: u8) {
         while let Some(ev) = rx.blocking_recv() {
             if self.generation.load(Ordering::SeqCst) != generation {
                 break;
             }
-            self.handle_event(ev);
+            if self.admit(src, &ev) {
+                self.handle_event(ev);
+            }
+        }
+    }
+
+    /// Source arbitration. The native source reports `PhoneJoined` only after it authenticated, so
+    /// it takes the session (preempting WebRTC). WebRTC claims it on `MediaConnected` (which
+    /// follows its pairing check) unless native already owns it; while native owns it, WebRTC
+    /// events are dropped. Returns whether the event should be handled.
+    fn admit(&self, src: u8, ev: &TransportEvent) -> bool {
+        let reset_rotation = || {
+            self.cvo.store(-1, Ordering::Relaxed);
+            self.rot_hint.store(0, Ordering::Relaxed);
+        };
+        let cur = self.active.load(Ordering::SeqCst);
+        match (src, ev) {
+            (SRC_NATIVE, TransportEvent::PhoneJoined) => {
+                if cur != SRC_NATIVE {
+                    tracing::info!("[app] native source took the session");
+                    self.active.store(SRC_NATIVE, Ordering::SeqCst);
+                    reset_rotation();
+                }
+                true
+            }
+            (SRC_NATIVE, TransportEvent::PhoneLeft) => {
+                if cur == SRC_NATIVE {
+                    self.active.store(SRC_NONE, Ordering::SeqCst);
+                }
+                true
+            }
+            (SRC_NATIVE, _) => cur == SRC_NATIVE,
+            (_, _) if cur == SRC_NATIVE => false,
+            (_, TransportEvent::MediaConnected) => {
+                if cur != SRC_WEBRTC {
+                    tracing::info!("[app] webrtc source took the session");
+                    self.active.store(SRC_WEBRTC, Ordering::SeqCst);
+                }
+                true
+            }
+            (_, TransportEvent::PhoneLeft) => {
+                if cur == SRC_WEBRTC {
+                    self.active.store(SRC_NONE, Ordering::SeqCst);
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// Send a control message to the source that owns the session (both while none does).
+    fn send_active(&self, g: &Inner, ctl: Ctl) {
+        let cur = self.active.load(Ordering::SeqCst);
+        if cur != SRC_NATIVE {
+            if let Some(h) = &g.recv {
+                h.send_ctl(ctl.clone());
+            }
+        }
+        if cur != SRC_WEBRTC {
+            if let Some(h) = &g.native {
+                h.send_ctl(ctl);
+            }
         }
     }
 
@@ -185,7 +267,7 @@ impl Shared {
             g.settings.zoom = g.settings.zoom.clamp(lo, hi);
         }
         if first {
-            if let Some(h) = &g.recv {
+            {
                 let mut ctl = g.settings.ctl_set(Diff::default(), true);
                 let phone_size = (g.view.phone_width, g.view.phone_height);
                 if let Ctl::Set { lens, profile, .. } = &mut ctl {
@@ -202,7 +284,7 @@ impl Shared {
                     }
                 }
                 tracing::info!("[app] first caps of the session: pushing saved settings {ctl:?}");
-                h.send_ctl(ctl);
+                self.send_active(g, ctl);
             }
         }
         if g.settings.lens.as_deref() != Some(current) && (!first || !known) {
@@ -261,9 +343,7 @@ impl Shared {
                 self.media.set_rotation(g.settings.rotation);
             }
             if d.any_phone() {
-                if let Some(h) = &g.recv {
-                    h.send_ctl(g.settings.ctl_set(d, false));
-                }
+                self.send_active(&g, g.settings.ctl_set(d, false));
             }
         }
         self.snapshot()
@@ -288,17 +368,31 @@ impl Shared {
     fn poll_keyframe_request(&self, last: &mut std::time::Instant) {
         if self.media.take_keyframe_request() && last.elapsed() >= Duration::from_secs(1) {
             *last = std::time::Instant::now();
-            if let Some(h) = &self.lock().recv {
-                h.request_keyframe();
+            let g = self.lock();
+            let cur = self.active.load(Ordering::SeqCst);
+            if cur != SRC_NATIVE {
+                if let Some(h) = &g.recv {
+                    h.request_keyframe();
+                }
+            }
+            if cur != SRC_WEBRTC {
+                if let Some(h) = &g.native {
+                    h.request_keyframe();
+                }
             }
         }
     }
 
     fn shutdown(&self) {
         tracing::info!("[app] shutting down");
-        if let Some(h) = self.lock().recv.take() {
+        let mut g = self.lock();
+        if let Some(h) = g.recv.take() {
             h.shutdown();
         }
+        if let Some(h) = g.native.take() {
+            h.shutdown();
+        }
+        drop(g);
         self.media.shutdown();
     }
 }

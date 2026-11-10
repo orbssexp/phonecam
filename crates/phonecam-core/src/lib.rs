@@ -5,6 +5,7 @@ pub mod backoff;
 pub mod conn;
 pub mod controls;
 pub mod heartbeat;
+pub mod native_auth;
 pub mod pairing;
 pub mod path;
 pub mod protocol;

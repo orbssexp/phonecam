@@ -10,6 +10,7 @@
 //! one reader per interface), so it can be called from any context.
 
 mod engine;
+pub mod native;
 mod netwatch;
 mod relay;
 pub mod rtc_config;
@@ -88,7 +89,7 @@ pub(crate) struct SharedStats {
 }
 
 impl SharedStats {
-    fn snapshot(&self) -> Stats {
+    pub(crate) fn snapshot(&self) -> Stats {
         Stats {
             access_units: self.access_units.load(Ordering::Relaxed),
             gaps: self.gaps.load(Ordering::Relaxed),

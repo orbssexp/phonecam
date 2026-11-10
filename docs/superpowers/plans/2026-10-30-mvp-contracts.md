@@ -177,3 +177,13 @@ Iriun's model works: native app, plain TCP on the LAN. The Safari page + relay s
 ### Round I (next, not now)
 Manual camera controls (ISO, shutter, exposure bias, white balance, focus lock), virtual camera
 output above 1080p, USB via usbmuxd, stream encryption.
+
+### Handshake test vectors (native v1; the desktop tests assert exactly these)
+- `k` = 32 bytes `00 01 02 ... 1f` (hex `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`)
+- `id` (TXT) = `2bbbe2d8a20e5e1a`
+- PC nonce = `000102030405060708090a0b0c0d0e0f`, phone nonce = `f0e1d2c3b4a5968778695a4b3c2d1e0f`
+- phone proof = HMAC-SHA256(k, ASCII `phonecam-native-v1|phone|` + pc + ph) =
+  `4b6cd30259cdb4f6b96a3cf1182ea0bccc8490990d88ba3be733d781aab4d4e1`
+- desktop proof = HMAC-SHA256(k, ASCII `phonecam-native-v1|desktop|` + ph + pc) =
+  `f51ff1c09a94749e1864debc1047e5fc55e7c5109055c954df8c1b41e87f818f`
+- `profile` strings in `set`: `economy`, `balanced`, `quality` (4K30), `smooth` (1080p60, alias `fps60`).
