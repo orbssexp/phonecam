@@ -116,3 +116,64 @@ Tasks:
 - G1 engine (Sonnet): logging; rotation (auto + manual) in media-win with unit tests; src stats; find why 4K shows 1080 (does `Ctl::Set{profile:quality}` reach the page? does the decoder/vcam path downscale — expected, vcam is fixed 1920×1080 — or is the stream itself 1080?); fps counter correctness; review reconnect/heartbeat logic for false disconnects on a real Wi-Fi phone (pings now really sent since F3: HB_INTERVAL 2 s, miss limit 3 — is 6 s too tight when iOS throttles timers/DC in background? does `alive()` cover it?).
 - G2 UI (agy): "Rotate" button (icon + text, cycles 0→90→180→270) in the Camera card; Decoder card rows: "Phone sends" (phoneW×phoneH @ phoneFps), "Received" (srcW×srcH @ srcFps), "Camera output" (width×height). Remove the single "Resolution"/"Frame rate" rows.
 - G3 page (agy): caps with width/height/fps from `track.getSettings()`, re-sent after each applied set and after orientation change; make `set profile` apply exact constraints and log the real result; res list must only offer modes the page can actually deliver (if 60 fps is offered but Safari delivers 30, drop the 60 entries).
+
+## Round H (2026-11-10) — native iPhone sender (phase 2 brought forward)
+
+Why: Safari caps WebRTC at 1080p, reopens the camera on every change, and stalls (see HANDOFF).
+Iriun's model works: native app, plain TCP on the LAN. The Safari page + relay stay as fallback.
+
+### Wire protocol "native v1" (both sides implement exactly this)
+- The PHONE listens (TCP, preferred port 47810, any free port otherwise) and advertises Bonjour
+  `_phonecam._tcp` with TXT `v=1`, `id=<first 16 hex chars of SHA-256("phonecam-id-v1" || k)>`,
+  `name=<device name>`. The PC browses mDNS, connects to the service whose `id` matches its pairing
+  secret `k` (32 raw bytes, the same hex `k` already in the pairing QR). No inbound rule on the PC.
+- Frame: `u32 BE len` (covers type + payload, max 8 MiB) | `u8 type` | payload.
+  - `0x01` control: UTF-8 JSON.
+  - `0x03` video AU: `u64 BE pts_us` | `u8 flags` (bit0 = keyframe) | `u8 rot` (0..3, x90 deg
+    clockwise needed to display upright) | H.264 Annex-B (start codes; SPS+PPS inline on keyframes).
+- Handshake (control frames; nonces are 16 random bytes as 32 hex chars; HMAC-SHA256 keyed by `k`,
+  output hex; message is the ASCII concatenation shown):
+  1. PC: `{"t":"hello","v":1,"nonce":"<pc>"}`
+  2. Phone: `{"t":"auth","nonce":"<ph>","proof":HMAC("phonecam-native-v1|phone|"+pc+ph)}`
+  3. PC verifies, sends `{"t":"auth_ok","proof":HMAC("phonecam-native-v1|desktop|"+ph+pc)}`
+  4. Phone verifies, then sends `caps` and starts video with a keyframe. Any failure: close.
+- After the handshake control JSON is the existing `phonecam_core::protocol::Ctl` (same serde
+  shapes: ping/pong/set/paused/resumed/caps) plus PC -> phone `{"type":"keyframe"}`.
+- v1 authenticates but does NOT encrypt the stream (LAN only). Encryption is a later round.
+
+### H1 — desktop native receiver (Sonnet; crates/phonecam-transport, core, src-tauri wiring)
+- New module in transport: mDNS browse (`mdns-sd`), TCP client (TCP_NODELAY, 4 MiB recv buffer),
+  handshake, frame parser, reconnect with the core backoff. Emits the SAME events the WebRTC engine
+  emits (state, AUs to media, caps, battery, path = Lan) so media-win and the UI are untouched.
+- Runs alongside the relay/WebRTC engine; whichever source authenticates first owns the session,
+  native preferred. Heartbeat via ping/pong; `Set` goes over the active source.
+- Profiles gain real `3840x2160@30` and `1920x1080@60` for the native source.
+- Tests: frame codec round-trip, handshake proofs (fixed vectors written into this doc's test so the
+  Swift side can copy them), rejects bad proof, a fake-phone TCP server integration test that
+  streams a recorded H.264 file and reaches Live. `cargo test --workspace`, clippy `-D warnings`.
+- Also log `[native]` lines to phonecam.log. Never log `k`.
+
+### H2 — iOS app (Sonnet; apps/ios, .github/workflows/ios.yml)
+- SwiftUI app "PhoneCam", iOS 16+, XcodeGen `project.yml` (no hand-written pbxproj), no third-party
+  deps. Info.plist: camera usage, local network usage, `NSBonjourServices = [_phonecam._tcp]`.
+- Pairing: scan the desktop QR (the existing https URL; read `k` from the fragment), keep `k` in
+  the Keychain. Afterwards opening the app is enough: it listens and the PC connects.
+- Capture AVFoundation -> VideoToolbox H.264 (real time, no frame reordering, High profile,
+  keyframe every 2 s and on request). Bitrates: 4K30 25 Mbps, 1080p60 16, 1080p30 10, 720p30 5.
+  Lens list from the discovery session, zoom, torch, front/back; applying a `set` reconfigures the
+  running session without dropping the TCP connection.
+- Backpressure: if more than ~1 s of video is queued, drop until the queue drains, then send a
+  keyframe. Screen stays awake; on background/interruption send `paused`, on return `resumed`.
+- Screen: dark, minimal — live preview, status line, "Pair" (scanner), nothing else.
+- CI: macOS runner, `xcodegen` + `xcodebuild` with signing disabled, zip `Payload/` into an
+  unsigned `PhoneCam.ipa` uploaded as an artifact (user signs with Sideloadly). The agent iterates
+  on a pushed branch until the workflow is green; that is the only compile check available.
+
+### H3 — desktop UI restyle (Haiku; apps/desktop/src only)
+- Match the user's reference: near-black background, 1px hairline borders, square corners, small
+  uppercase mono labels in brackets, large light heading, preview left / settings card right,
+  footer hints in muted text. No behaviour or IPC change. `npm run build` must pass.
+
+### Round I (next, not now)
+Manual camera controls (ISO, shutter, exposure bias, white balance, focus lock), virtual camera
+output above 1080p, USB via usbmuxd, stream encryption.
