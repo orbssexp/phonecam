@@ -1,0 +1,34 @@
+name: PhoneCam
+options:
+  bundleIdPrefix: com.orbssexp
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  PhoneCam:
+    type: application
+    platform: iOS
+    sources:
+      - PhoneCam
+    info:
+      path: PhoneCam/Info.plist
+      properties:
+        CFBundleDisplayName: PhoneCam
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: PhoneCam uses the camera to send video to your PC.
+        NSLocalNetworkUsageDescription: PhoneCam talks to the PhoneCam app on your PC over the local network.
+        NSBonjourServices:
+          - _phonecam._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.orbssexp.phonecam
+        GENERATE_INFOPLIST_FILE: NO
