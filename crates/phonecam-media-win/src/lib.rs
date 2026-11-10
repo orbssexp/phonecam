@@ -189,9 +189,8 @@ unsafe impl Send for ScalerWrapper {}
 
 impl ScalerWrapper {
     fn new(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Self {
-        let raw = unsafe {
-            ffi::scaler_create(src_w as i32, src_h as i32, dst_w as i32, dst_h as i32)
-        };
+        let raw =
+            unsafe { ffi::scaler_create(src_w as i32, src_h as i32, dst_w as i32, dst_h as i32) };
         Self {
             raw,
             src_w,
@@ -254,8 +253,39 @@ pub struct MediaHandle {
     latest_frame: Arc<Mutex<Option<LatestFrame>>>,
     shutdown_flag: Arc<AtomicBool>,
     mirror: Arc<AtomicBool>,
+    preview: Arc<PreviewDemand>,
     worker_thread: Option<JoinHandle<()>>,
 }
+
+/// Tracks whether anyone is looking at the preview, so the media thread only keeps a copy of the
+/// last frame (6 MB at 1080p) while the window is open.
+struct PreviewDemand {
+    epoch: Instant,
+    last_ms: std::sync::atomic::AtomicU64,
+}
+
+impl PreviewDemand {
+    fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            last_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn touch(&self) {
+        let ms = self.epoch.elapsed().as_millis() as u64 + 1;
+        self.last_ms.store(ms, Ordering::Relaxed);
+    }
+
+    fn wanted(&self) -> bool {
+        let last = self.last_ms.load(Ordering::Relaxed);
+        last != 0
+            && (self.epoch.elapsed().as_millis() as u64 + 1).saturating_sub(last)
+                < PREVIEW_DEMAND_MS
+    }
+}
+
+const PREVIEW_DEMAND_MS: u64 = 3000;
 
 impl MediaHandle {
     /// Pushes an encoded H.264 Access Unit (AU) slice to the decoder.
@@ -292,6 +322,7 @@ impl MediaHandle {
     ///
     /// Returns `None` if no frame is available yet or encoding fails.
     pub fn preview_jpeg(&self, max_w: u32) -> Option<Vec<u8>> {
+        self.preview.touch();
         let guard = self.latest_frame.lock().ok()?;
         let frame = guard.as_ref()?;
         encode_preview_jpeg(&frame.bgr, frame.w, frame.h, max_w)
@@ -345,6 +376,8 @@ impl Media {
         let shutdown_clone = Arc::clone(&shutdown_flag);
         let mirror = Arc::new(AtomicBool::new(false));
         let mirror_clone = Arc::clone(&mirror);
+        let preview = Arc::new(PreviewDemand::new());
+        let preview_clone = Arc::clone(&preview);
 
         let worker_thread = thread::Builder::new()
             .name("phonecam-media".to_string())
@@ -358,6 +391,7 @@ impl Media {
                     latest_clone,
                     shutdown_clone,
                     mirror_clone,
+                    preview_clone,
                 );
             })
             .expect("failed to spawn media thread");
@@ -368,10 +402,15 @@ impl Media {
             latest_frame,
             shutdown_flag,
             mirror,
+            preview,
             worker_thread: Some(worker_thread),
         }
     }
 }
+
+const DEC_BUF_BYTES: usize = 3840 * 2160 * 3;
+/// No access unit for this long: drop the decoder (and its GPU surfaces / driver state).
+const DEC_IDLE_TEARDOWN: Duration = Duration::from_secs(3);
 
 fn decoder_chain(pref: DecoderPref) -> Vec<i32> {
     match pref {
@@ -383,11 +422,17 @@ fn decoder_chain(pref: DecoderPref) -> Vec<i32> {
 
 fn update_latest_frame(
     latest_frame: &Arc<Mutex<Option<LatestFrame>>>,
+    preview: &PreviewDemand,
     w: u32,
     h: u32,
     bgr: &[u8],
 ) {
     if let Ok(mut guard) = latest_frame.lock() {
+        if !preview.wanted() {
+            // Nobody is looking (tray mode): do not keep a frame copy around.
+            *guard = None;
+            return;
+        }
         if let Some(existing) = guard.as_mut() {
             if existing.w == w && existing.h == h && existing.bgr.len() == bgr.len() {
                 existing.bgr.copy_from_slice(bgr);
@@ -412,19 +457,25 @@ fn run_media_loop(
     latest_frame: Arc<Mutex<Option<LatestFrame>>>,
     shutdown_flag: Arc<AtomicBool>,
     mirror: Arc<AtomicBool>,
+    preview: Arc<PreviewDemand>,
 ) {
     let mut decoder_pref = decoder_pref;
     let cam = SoftcamCamera::new(out_w, out_h);
 
     let mut out_buf = vec![0u8; (out_w * out_h * 3) as usize];
-    let mut dec_buf = vec![0u8; (3840 * 2160 * 3) as usize];
+    // Allocated only while a decoder is open (a 4K BGR buffer is 25 MB of commit).
+    let mut dec_buf: Vec<u8> = Vec::new();
+    let mut last_au_at = Instant::now();
+    // Once a frame matches the output size exactly, decode straight into `out_buf` and drop
+    // `dec_buf` (saves a 6 MB copy at 1080p).
+    let mut direct_ok = false;
 
     let mut current_vcam_frame = VcamFrame::Placeholder;
 
     // Initial placeholder frame
     placeholder::render_placeholder(current_vcam_frame, out_w, out_h, &mut out_buf);
     cam.send_frame(&out_buf);
-    update_latest_frame(&latest_frame, out_w, out_h, &out_buf);
+    update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
 
     let mut dec: Option<DecWrapper> = None;
     let mut chain = decoder_chain(decoder_pref);
@@ -458,6 +509,8 @@ fn run_media_loop(
                     chain = decoder_chain(pref);
                     ci = 0;
                     dec = None;
+                    dec_buf = Vec::new();
+                    direct_ok = false;
                     scaler = None;
                     decode_errors = 0;
                     total_frames_decoded = 0;
@@ -474,12 +527,18 @@ fn run_media_loop(
                             &mut out_buf,
                         );
                         cam.send_frame(&out_buf);
-                        update_latest_frame(&latest_frame, out_w, out_h, &out_buf);
+                        update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
                         last_tick = Instant::now();
                     }
                 }
             }
             Some(MediaMsg::Au(au)) => {
+                last_au_at = Instant::now();
+                // The decoder is torn down when the stream stops; reopen only on a keyframe so the
+                // hardware-fallback logic never mistakes missing reference frames for a broken decoder.
+                if dec.is_none() && !au.keyframe {
+                    continue;
+                }
                 // Initialize decoder lazily
                 if dec.is_none() && ci < chain.len() {
                     match DecWrapper::new(chain[ci]) {
@@ -506,13 +565,23 @@ fn run_media_loop(
                     let mut h = 0i32;
                     let mut hw = 0i32;
 
+                    let direct = direct_ok && current_vcam_frame == VcamFrame::Camera;
+                    if !direct && dec_buf.is_empty() {
+                        dec_buf = vec![0u8; DEC_BUF_BYTES];
+                    }
+                    let (dst_ptr, dst_len) = if direct {
+                        (out_buf.as_mut_ptr(), out_buf.len())
+                    } else {
+                        (dec_buf.as_mut_ptr(), dec_buf.len())
+                    };
+
                     let n = unsafe {
                         ffi::dec_decode(
                             d.0,
                             au.data.as_ptr(),
                             au.data.len() as i32,
-                            dec_buf.as_mut_ptr(),
-                            dec_buf.len() as i32,
+                            dst_ptr,
+                            dst_len as i32,
                             &mut w,
                             &mut h,
                             &mut hw,
@@ -520,11 +589,14 @@ fn run_media_loop(
                     };
 
                     if n < 0 {
+                        direct_ok = false;
                         decode_errors += 1;
                         if decode_errors >= 10 && total_frames_decoded == 0 && ci + 1 < chain.len()
                         {
                             tracing::warn!("Hardware decode produced no frames, falling back");
                             dec = None;
+                            dec_buf = Vec::new();
+                            direct_ok = false;
                             ci += 1;
                             decode_errors = 0;
                         }
@@ -537,7 +609,21 @@ fn run_media_loop(
                         }
 
                         // If VcamFrame is Camera, scale and send to softcam!
-                        if current_vcam_frame == VcamFrame::Camera {
+                        if direct && (w as u32, h as u32) != (out_w, out_h) {
+                            // Resolution changed under us: the frame landed in out_buf's prefix.
+                            direct_ok = false;
+                            let bytes = (w as usize * h as usize * 3).min(out_buf.len());
+                            dec_buf = vec![0u8; DEC_BUF_BYTES];
+                            dec_buf[..bytes].copy_from_slice(&out_buf[..bytes]);
+                        }
+                        if direct && (w as u32, h as u32) == (out_w, out_h) {
+                            if mirror.load(Ordering::Relaxed) {
+                                letterbox::mirror_bgr_in_place(&mut out_buf, out_w, out_h);
+                            }
+                            cam.send_frame(&out_buf);
+                            update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
+                            last_tick = Instant::now();
+                        } else if current_vcam_frame == VcamFrame::Camera {
                             let rect = calculate_letterbox(w as u32, h as u32, out_w, out_h);
 
                             if rect.scaled_w != out_w || rect.scaled_h != out_h {
@@ -574,23 +660,32 @@ fn run_media_loop(
                                 letterbox::mirror_bgr_in_place(&mut out_buf, out_w, out_h);
                             }
                             cam.send_frame(&out_buf);
-                            update_latest_frame(&latest_frame, out_w, out_h, &out_buf);
+                            update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
                             last_tick = Instant::now();
+                            if (w as u32, h as u32) == (out_w, out_h) {
+                                direct_ok = true;
+                                dec_buf = Vec::new();
+                            }
                         }
                     }
                 }
             }
             None => {
                 // Timeout elapsed (no AU arrived or not streaming)
+                if dec.is_some() && last_au_at.elapsed() >= DEC_IDLE_TEARDOWN {
+                    tracing::info!("Stream idle, releasing decoder");
+                    dec = None;
+                    dec_buf = Vec::new();
+                    direct_ok = false;
+                    scaler = None;
+                    decode_errors = 0;
+                    total_frames_decoded = 0;
+                    unsafe { ffi::dec_trim_memory() };
+                }
                 if current_vcam_frame != VcamFrame::Camera || total_frames_decoded == 0 {
-                    placeholder::render_placeholder(
-                        current_vcam_frame,
-                        out_w,
-                        out_h,
-                        &mut out_buf,
-                    );
+                    placeholder::render_placeholder(current_vcam_frame, out_w, out_h, &mut out_buf);
                     cam.send_frame(&out_buf);
-                    update_latest_frame(&latest_frame, out_w, out_h, &out_buf);
+                    update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
                     last_tick = Instant::now();
                 }
             }
@@ -605,7 +700,10 @@ mod tests {
     #[test]
     fn test_decoder_pref_display_and_parse() {
         assert_eq!(DecoderPref::from_str("auto").unwrap(), DecoderPref::Auto);
-        assert_eq!(DecoderPref::from_str("d3d11va").unwrap(), DecoderPref::D3d11va);
+        assert_eq!(
+            DecoderPref::from_str("d3d11va").unwrap(),
+            DecoderPref::D3d11va
+        );
         assert_eq!(DecoderPref::from_str("cuda").unwrap(), DecoderPref::Cuda);
         assert_eq!(DecoderPref::from_str("cpu").unwrap(), DecoderPref::Cpu);
         assert!(DecoderPref::from_str("unknown").is_err());
@@ -620,11 +718,15 @@ mod tests {
         assert_eq!(stats.w, 0);
         assert_eq!(stats.h, 0);
 
-        // Preview should be available immediately from initial placeholder
-        // Give background thread a short moment to render
-        thread::sleep(Duration::from_millis(50));
+        // The frame copy is only kept while someone asks for the preview: the first call registers
+        // interest, the placeholder tick (200 ms) then fills it.
+        assert!(handle.preview_jpeg(320).is_none());
+        thread::sleep(Duration::from_millis(500));
         let preview = handle.preview_jpeg(320);
-        assert!(preview.is_some(), "Preview JPEG should be produced from initial placeholder");
+        assert!(
+            preview.is_some(),
+            "Preview JPEG should be produced from initial placeholder"
+        );
         let bytes = preview.unwrap();
         assert!(bytes.len() > 100);
         assert_eq!(bytes[0], 0xFF);
