@@ -10,7 +10,16 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [],
+    "windows": [
+      {
+        "label": "main",
+        "title": "PhoneCam",
+        "width": 1000,
+        "height": 720,
+        "minWidth": 900,
+        "minHeight": 640
+      }
+    ],
     "security": { "csp": null }
   },
   "bundle": {
