@@ -73,11 +73,24 @@ final class Camera: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
     // MARK: configuration
 
-    func startRunning() {
-        queue.async {
-            if !self.configured { self.applyConfig(lensId: nil, width: 1920, height: 1080, fps: 30) }
-            if !self.session.isRunning { self.session.startRunning() }
+    func startRunning() { queue.async { self.startNow() } }
+
+    /// Call on `queue`. No-op without camera permission.
+    func startNow() {
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
+        if !configured { applyConfig(lensId: nil, width: 1920, height: 1080, fps: 30) }
+        if !session.isRunning {
+            DebugLog.log("capture start")
+            session.startRunning()
         }
+    }
+
+    /// Call on `queue`: full stop/start (after interruption, runtime error, or no frames).
+    func restartNow() {
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
+        DebugLog.log("capture restart")
+        if session.isRunning { session.stopRunning() }
+        startNow()
     }
 
     func stopRunning() {

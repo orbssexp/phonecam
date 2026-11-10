@@ -8,6 +8,7 @@ final class AppModel: ObservableObject {
     @Published var status = "Not paired"
     @Published var paired = false
     @Published var showScanner = false
+    @Published var showLog = false
     @Published var pairError: String?
 
     let camera = Camera()
@@ -16,21 +17,41 @@ final class AppModel: ObservableObject {
 
     // Touched on camera.queue only.
     private var streaming = false
+    private var suspended = false          // scanner open: camera intentionally stopped
+    private var capsPending = false
     private var sentFrames = 0
+    private var sentBytes = 0
     private var statWindow = Date()
     private var measuredFps = 0
+    private var measuredKbps = 0
     private var sentW = 0, sentH = 0
     private var lastRot: UInt8 = 1
+    private var lastSampleAt = Date()
+    private var lastRecover = Date.distantPast
+    private var frameCounter = 0
+    private var stride = 1                 // encode every Nth captured frame (adaptive when Wi-Fi is slow)
+    private var lastDropAt = Date.distantPast
+    private var watchdog: DispatchSourceTimer?
+
+    // Net-queue stats, read on main.
+    private var backlogMs = 0
+    private var dropped = 0
 
     private var key: Data?
     private var connected = false
+    private var started = false
     private var observers: [NSObjectProtocol] = []
+
+    static var version: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+    }
 
     init() {
         encoder.onAU = { [weak self] pts, keyframe, rot, data in
             guard let self = self else { return }
             self.server.sendVideo(ptsUs: pts, keyframe: keyframe, rot: rot, annexB: data)
-            self.camera.queue.async { self.noteSent() }
+            let n = data.count
+            self.camera.queue.async { self.noteSent(bytes: n) }
         }
         camera.onSample = { [weak self] sb in self?.handleSample(sb) }
 
@@ -38,8 +59,13 @@ final class AppModel: ObservableObject {
             guard let self = self else { return }
             self.camera.queue.async {
                 self.streaming = true
+                self.lastSampleAt = Date()
+                self.stride = 1
+                // Encoding must be running whenever a desktop is authenticated.
+                if !self.suspended { self.camera.startNow() }
+                self.encoder.invalidate()
                 self.encoder.requestKeyframe()
-                self.server.bitrate = self.encoder.bitrate
+                self.server.setBitrate(self.currentBitrate())
                 self.sendCaps()
             }
             DispatchQueue.main.async {
@@ -62,32 +88,63 @@ final class AppModel: ObservableObject {
             guard let self = self else { return }
             self.camera.queue.async { self.encoder.requestKeyframe() }
         }
+        server.onDropped = { [weak self] in
+            guard let self = self else { return }
+            // Wi-Fi cannot carry the target rate: encode fewer frames, stay live.
+            self.camera.queue.async {
+                self.lastDropAt = Date()
+                if self.stride < 3 {
+                    self.stride += 1
+                    DebugLog.log("slow link: encoding every \(self.stride). frame")
+                }
+            }
+        }
+        server.onStats = { [weak self] ms, d in
+            guard let self = self else { return }
+            DispatchQueue.main.async { self.backlogMs = ms; self.dropped = d }
+        }
+
+        let t = DispatchSource.makeTimerSource(queue: camera.queue)
+        t.schedule(deadline: .now() + 1, repeating: 1)
+        t.setEventHandler { [weak self] in self?.tick() }
+        t.resume()
+        watchdog = t
     }
 
     func start() {
+        guard !started else { return }     // onAppear can fire more than once
+        started = true
         UIDevice.current.isBatteryMonitoringEnabled = true
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
         OrientationBox.shared.refresh()
+        DebugLog.log("PhoneCam \(AppModel.version) start")
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main) { _ in
             OrientationBox.shared.refresh()
         })
         observers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            DebugLog.log("background")
             self?.sendPaused("background")
         })
-        observers.append(nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.sendResumed()
+        observers.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.recover("became active")
         })
         observers.append(nc.addObserver(forName: .AVCaptureSessionWasInterrupted, object: nil, queue: .main) { [weak self] n in
             var reason = "unknown"
             if let r = n.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int {
                 if r == AVCaptureSession.InterruptionReason.videoDeviceInUseByAnotherClient.rawValue ||
                     r == AVCaptureSession.InterruptionReason.audioDeviceInUseByAnotherClient.rawValue { reason = "call" }
+                DebugLog.log("capture interrupted (reason \(r))")
             }
             self?.sendPaused(reason)
         })
         observers.append(nc.addObserver(forName: .AVCaptureSessionInterruptionEnded, object: nil, queue: .main) { [weak self] _ in
-            self?.sendResumed()
+            self?.recover("interruption ended")
+        })
+        observers.append(nc.addObserver(forName: .AVCaptureSessionRuntimeError, object: nil, queue: .main) { [weak self] n in
+            DebugLog.log("capture runtime error: \(String(describing: n.userInfo?[AVCaptureSessionErrorKey]))")
+            self?.camera.queue.async { self?.camera.restartNow() }
+            self?.recover("runtime error")
         })
 
         key = Keychain.load()
@@ -107,8 +164,12 @@ final class AppModel: ObservableObject {
 
     // MARK: pairing
 
-    func resumeCamera() { camera.startRunning() }
-    func suspendCamera() { camera.stopRunning() }
+    func resumeCamera() {
+        camera.queue.async { self.suspended = false; self.camera.startNow() }
+    }
+    func suspendCamera() {
+        camera.queue.async { self.suspended = true; if self.camera.session.isRunning { self.camera.session.stopRunning() } }
+    }
 
     func handleScanned(_ text: String) -> Bool {
         guard let k = AppModel.parseKey(text) else { return false }
@@ -139,7 +200,11 @@ final class AppModel: ObservableObject {
     // MARK: video
 
     private func handleSample(_ sb: CMSampleBuffer) {
+        lastSampleAt = Date()
         guard streaming, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+        // Adaptive stride: skip BEFORE the encoder so nothing ever queues behind a slow socket.
+        frameCounter &+= 1
+        if stride > 1 && frameCounter % stride != 0 { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
         lastRot = OrientationBox.shared.value
         sentW = CVPixelBufferGetWidth(pb)
@@ -147,15 +212,77 @@ final class AppModel: ObservableObject {
         encoder.encode(pb, pts: pts, rot: lastRot)
     }
 
-    private func noteSent() {
+    private func noteSent(bytes: Int) {
         sentFrames += 1
+        sentBytes += bytes
         let now = Date()
-        if now.timeIntervalSince(statWindow) >= 1 {
-            measuredFps = Int((Double(sentFrames) / now.timeIntervalSince(statWindow)).rounded())
+        let dt = now.timeIntervalSince(statWindow)
+        if dt >= 1 {
+            measuredFps = Int((Double(sentFrames) / dt).rounded())
+            measuredKbps = Int(Double(sentBytes) * 8 / dt / 1000)
             sentFrames = 0
+            sentBytes = 0
             statWindow = now
-            let text = "Streaming \(sentW)x\(sentH) @ \(measuredFps) fps"
-            DispatchQueue.main.async { if self.connected { self.status = text } }
+            let text = "Streaming \(sentW)x\(sentH) @ \(measuredFps) fps | \(measuredKbps) kbps"
+            DispatchQueue.main.async {
+                if self.connected {
+                    self.status = text + " | lag \(self.backlogMs) ms | drop \(self.dropped)"
+                }
+            }
+        }
+    }
+
+    private func currentBitrate() -> Int {
+        if let s = camera.state() {
+            return Encoder.bitrateFor(width: s.width, height: s.height, fps: Int(s.fps.rounded()))
+        }
+        return encoder.bitrate
+    }
+
+    /// 1 Hz on camera.queue: self-heal capture/encoder while a desktop is connected.
+    private func tick() {
+        guard streaming, !suspended else { return }
+        let now = Date()
+        if capsPending { sendCaps() }
+        if stride > 1 && now.timeIntervalSince(lastDropAt) > 8 {
+            stride -= 1
+            lastDropAt = now
+            DebugLog.log("link recovered: encoding every \(stride). frame")
+        }
+        guard now.timeIntervalSince(lastRecover) > 3 else { return }
+        if !camera.session.isRunning {
+            DebugLog.log("watchdog: capture not running")
+            lastRecover = now
+            camera.startNow()
+            return
+        }
+        let sampleAge = now.timeIntervalSince(lastSampleAt)
+        if sampleAge > 2.5 {
+            DebugLog.log("watchdog: no frames for \(Int(sampleAge)) s, restarting capture")
+            lastRecover = now
+            camera.restartNow()
+            encoder.invalidate()
+            lastSampleAt = Date()
+        } else if sampleAge < 1 && encoder.outputAge > 2.5 {
+            DebugLog.log("watchdog: encoder stalled, rebuilding")
+            lastRecover = now
+            encoder.invalidate()
+        }
+    }
+
+    /// Foreground / interruption ended: restart capture and encoder, then resumed + caps + keyframe.
+    private func recover(_ why: String) {
+        camera.queue.async {
+            DebugLog.log("resume: \(why)")
+            if !self.suspended { self.camera.startNow() }
+            self.encoder.invalidate()
+            self.encoder.requestKeyframe()
+            self.lastSampleAt = Date()
+            self.lastRecover = Date()
+            if self.streaming {
+                self.server.sendControl(Ctl(type: "resumed"))
+                self.sendCaps()
+            }
         }
     }
 
@@ -172,6 +299,7 @@ final class AppModel: ObservableObject {
             p.charging = (st == .charging || st == .full)
             server.sendControl(p)
         case "keyframe":
+            DebugLog.log("keyframe requested")
             camera.queue.async { self.encoder.requestKeyframe() }
         case "set":
             camera.queue.async { self.applySet(ctl) }
@@ -197,20 +325,28 @@ final class AppModel: ObservableObject {
         if let p = ctl.profile, let m = AppModel.mode(for: p) { (w, h, f) = m; reconfigure = true }
         if ctl.lens != nil { reconfigure = true }
         if w == 0 { (w, h, f) = (1920, 1080, 30); reconfigure = true }
+        DebugLog.log("set profile=\(ctl.profile ?? "-") lens=\(ctl.lens == nil ? "-" : "yes") zoom=\(ctl.zoom.map { String($0) } ?? "-") torch=\(ctl.torch.map { String($0) } ?? "-")")
         if reconfigure {
+            DebugLog.log("reconfigure \(w)x\(h) @\(f)")
             camera.applyConfig(lensId: ctl.lens, width: w, height: h, fps: f)
+            // Rebuild the compression session for the new size/fps (never mix sizes in one session).
             encoder.setFps(Int(camera.actualFps.rounded()))
+            encoder.invalidate()
+            stride = 1
+            if !suspended { camera.startNow() }
+            lastSampleAt = Date()
         }
         if let z = ctl.zoom { camera.setZoom(z) }
         if let t = ctl.torch { camera.setTorch(t) }
         encoder.requestKeyframe()
-        server.bitrate = Encoder.bitrateFor(width: w, height: h, fps: Int(camera.actualFps.rounded()))
+        server.setBitrate(currentBitrate())
         sendCaps()
     }
 
     /// Call on camera.queue.
     private func sendCaps() {
-        guard let s = camera.state() else { return }
+        guard let s = camera.state() else { capsPending = true; return }
+        capsPending = false
         var c = Ctl(type: "caps")
         c.lenses = camera.lenses()
         c.current = s.lensId
@@ -228,10 +364,5 @@ final class AppModel: ObservableObject {
         var c = Ctl(type: "paused")
         c.reason = reason
         server.sendControl(c)
-    }
-
-    private func sendResumed() {
-        server.sendControl(Ctl(type: "resumed"))
-        camera.queue.async { self.encoder.requestKeyframe() }
     }
 }

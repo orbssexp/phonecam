@@ -57,9 +57,17 @@ struct ContentView: View {
                         .overlay(Rectangle().stroke(Color.white.opacity(0.5), lineWidth: 1))
                         .background(Color.black.opacity(0.55))
                 }
-                .padding(.bottom, 24)
+                .padding(.bottom, 8)
+                HStack(spacing: 16) {
+                    Text("v\(AppModel.version)")
+                    Button("Log") { model.showLog = true }
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.white.opacity(0.6))
+                .padding(.bottom, 16)
             }
         }
+        .sheet(isPresented: $model.showLog) { LogView() }
         .sheet(isPresented: $model.showScanner, onDismiss: { model.resumeCamera() }) {
             ZStack(alignment: .top) {
                 ScannerView { code in
@@ -75,5 +83,37 @@ struct ContentView: View {
             }
             .onAppear { model.pairError = nil; model.suspendCamera() }
         }
+    }
+}
+
+struct LogView: View {
+    @ObservedObject private var log = DebugLog.shared
+    @Environment(\.presentationMode) private var presentation
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("PhoneCam v\(AppModel.version)")
+                    Spacer()
+                    Button("Close") { presentation.wrappedValue.dismiss() }
+                }
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundColor(.white)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(log.lines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.8))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .padding(12)
+        }
+        .preferredColorScheme(.dark)
     }
 }
