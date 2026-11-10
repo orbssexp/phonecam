@@ -87,3 +87,24 @@ Pending (start a fresh session):
 3. Known unfixed: if str0m closes the session (DTLS close_notify / SCTP lost) the page needs a reload.
 4. Unverified on hardware: Wi-Fi -> USB failover, lock/call recovery, PC-side lens/zoom/torch/mirror.
 5. Cleanup: worktrees `phonecam-wt-*`, `git stash drop` (stash@{0} is a stray duplicate, do not apply).
+
+## Update 2026-11-10 (real iPhone test of round G + Iriun inspection)
+
+User report: still unstable, 4K does not work, front camera breaks when settings are changed a lot.
+
+Evidence from `%APPDATA%\PhoneCam\phonecam.log`:
+- Phone caps report 3840x2160 but the decoded stream is always 1920x1080: Safari's WebRTC encoder
+  caps at 1080p. 4K is not reachable from the Safari page.
+- Freeze storms: 10 s windows with 0 AUs, +10 gaps, +10 PLI, 0 keyframes, NACK ~0 (119x "no keyframe
+  after PLI", 79x GAP). Loss is not being repaired by NACK and keyframes never complete. Not yet
+  diagnosed (suspects: small UDP receive buffer, RTX/NACK not active after track replace).
+- After many profile/lens changes: heartbeat lost for 60 s+, ConnectTimedOut, 14x restart_ice.
+
+Iriun (strings/imports of the installed binaries only): native iOS app, discovery by mDNS
+`_iriunwebcam._tcp`, video over plain TCP (TCP_NODELAY, enlarged socket buffers), USB via usbmuxd
+(tcp 4697/4699), FFmpeg decode, up to 3840x2160, native controls (ISO, exposure time/bias, white
+balance, focus lock, zoom, flash, flip).
+
+Direction proposed to the user (awaiting answer): bring phase 2 (native Swift sender) forward.
+UI reference from the user: near-black background, thin 1px borders, square corners, small
+bracketed mono labels ("[ JOIN SESSION ]"), large light heading, preview left + settings card right.
