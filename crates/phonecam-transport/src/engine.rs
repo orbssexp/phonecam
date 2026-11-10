@@ -21,12 +21,39 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::sync::{mpsc::Sender as TxSender, watch};
 
 const HB_INTERVAL_MS: u64 = 2_000;
-const HB_MISS_LIMIT: u32 = 3;
+/// 5 missed pongs (about 10 s) and no media. The phone re-acquires its camera on a lens/profile
+/// switch, which on iOS can take more than 5 s without media; 6 s was too tight for that.
+const HB_MISS_LIMIT: u32 = 5;
+/// After we send a camera-affecting `set`, the heartbeat is not allowed to fire for this long.
+const SET_GRACE: Duration = Duration::from_secs(12);
+/// While the phone says it is paused (backgrounded/locked) iOS may freeze its timers and
+/// DataChannel; do not call that a lost link for this long.
+const PAUSED_GRACE: Duration = Duration::from_secs(60);
+/// Media silent for longer than this and then resuming: ask for a keyframe (the decoder may have
+/// been released meanwhile and the encoder restarted).
+const RESUME_GAP: Duration = Duration::from_millis(1_500);
+const STATS_LOG_EVERY: Duration = Duration::from_secs(10);
 const IFACE_POLL: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PLI_RETRY: Duration = Duration::from_secs(1);
 const GAP_PLI_MIN_GAP: Duration = Duration::from_millis(300);
 const FAILBACK_AFTER: Duration = Duration::from_secs(30);
+
+/// Counters for the 10 s `[stats]` log line.
+struct StatWindow {
+    start: Instant,
+    aus: u32,
+    frames: u32,
+    keys: u32,
+    last_ts: Option<u64>,
+    prev: crate::Stats,
+}
+
+impl StatWindow {
+    fn new(now: Instant) -> Self {
+        Self { start: now, aus: 0, frames: 0, keys: 0, last_ts: None, prev: crate::Stats::default() }
+    }
+}
 
 pub(crate) enum Msg {
     Net { local: SocketAddr, src: SocketAddr, data: Vec<u8>, at: Instant },
@@ -92,6 +119,11 @@ struct Engine {
     connect_deadline: Option<Instant>,
     next_iface_poll: Instant,
     last_media_rx: Option<Instant>,
+    grace_until: Option<Instant>,
+    paused_since: Option<Instant>,
+    // diagnostics
+    win: StatWindow,
+    last_cvo: Option<Option<u16>>,
     // path
     current_path: Option<PathKind>,
     last_path_event: Option<(PathKind, u32)>,
@@ -133,6 +165,10 @@ pub(crate) fn spawn(
         connect_deadline: None,
         next_iface_poll: now,
         last_media_rx: None,
+        grace_until: None,
+        paused_since: None,
+        win: StatWindow::new(now),
+        last_cvo: None,
         current_path: None,
         last_path_event: None,
         last_path_at: now,
@@ -269,7 +305,7 @@ impl Engine {
                 }
             }
             if dead {
-                tracing::info!("[rtc] session ended");
+                tracing::info!("[rtc] session ended (rtc closed: DTLS close_notify, SCTP association lost or an I/O error); the phone must start a new connection");
                 self.session = None;
                 self.hb = None;
                 self.conn_event(ConnEvent::HeartbeatLost);
@@ -302,15 +338,34 @@ impl Engine {
                     hb.alive();
                 }
             }
+            // The phone is switching its camera (we just asked), or it told us it is paused.
+            let in_grace = self.grace_until.is_some_and(|t| now < t)
+                || self.paused_since.is_some_and(|t| now.duration_since(t) < PAUSED_GRACE);
+            if in_grace {
+                if let Some(hb) = self.hb.as_mut() {
+                    hb.alive();
+                }
+            }
             let act = self.hb.as_mut().and_then(|hb| hb.tick(ms));
             match act {
                 Some(HbAction::SendPing { t }) => {
                     let text = signal::to_json(&Ctl::Ping { t });
                     self.dc_write(&text);
                 }
-                Some(HbAction::Lost) => self.conn_event(ConnEvent::HeartbeatLost),
+                Some(HbAction::Lost) => {
+                    let silent = self.last_media_rx.map(|t| now.duration_since(t).as_millis());
+                    tracing::info!(
+                        "[hb] heartbeat lost: no pong for {} pings and media silent for {:?} ms",
+                        HB_MISS_LIMIT,
+                        silent
+                    );
+                    self.conn_event(ConnEvent::HeartbeatLost)
+                }
                 None => {}
             }
+        }
+        if now.duration_since(self.win.start) >= STATS_LOG_EVERY {
+            self.log_stats(now);
         }
         if self.retry_at.is_some_and(|t| now >= t) {
             self.retry_at = None;
@@ -372,11 +427,42 @@ impl Engine {
         }
     }
 
+    fn log_stats(&mut self, now: Instant) {
+        let secs = now.duration_since(self.win.start).as_secs_f32().max(0.001);
+        let st = self.stats.snapshot();
+        let live = matches!(self.conn.state(), ConnState::Live | ConnState::Paused(_));
+        if live || self.win.aus > 0 {
+            tracing::info!(
+                "[stats] last {:.0}s: {} AUs ({:.1}/s, {:.1} distinct frames/s by RTP ts, {} keyframes), +{} gaps, +{} PLI, +{} NACK, +{} dropped (total gaps {} pli {} nack {} dropped {}), rtt {:?} ms, state {:?}",
+                secs,
+                self.win.aus,
+                self.win.aus as f32 / secs,
+                self.win.frames as f32 / secs,
+                self.win.keys,
+                st.gaps - self.win.prev.gaps,
+                st.plis - self.win.prev.plis,
+                st.nacks - self.win.prev.nacks,
+                st.dropped_aus - self.win.prev.dropped_aus,
+                st.gaps,
+                st.plis,
+                st.nacks,
+                st.dropped_aus,
+                self.hb.as_ref().and_then(|h| h.rtt_ms()),
+                self.conn.state(),
+            );
+        }
+        self.win = StatWindow { prev: st, ..StatWindow::new(now) };
+    }
+
     // ---------- core state machine glue ----------
 
     fn conn_event(&mut self, ev: ConnEvent) {
         let before = self.conn.state();
         let actions = self.conn.handle(ev);
+        let after_state = self.conn.state();
+        if before != after_state {
+            tracing::info!("[conn] {before:?} -> {after_state:?} (cause: {ev:?})");
+        }
         let now = Instant::now();
         for a in actions {
             match a {
@@ -428,6 +514,10 @@ impl Engine {
             },
             Msg::Relay(RelayIn::Up) | Msg::Relay(RelayIn::Down) => {}
             Msg::Cmd(Cmd::SendCtl(c)) => {
+                if matches!(&c, Ctl::Set { profile, lens, .. } if profile.is_some() || lens.is_some()) {
+                    // The phone re-acquires its camera now; expect media to stall for a while.
+                    self.grace_until = Some(Instant::now() + SET_GRACE);
+                }
                 let text = signal::to_json(&c);
                 if !self.dc_write(&text) {
                     tracing::debug!("[ctl] DataChannel not open, dropping {c:?}");
@@ -445,6 +535,7 @@ impl Engine {
     }
 
     fn on_peer(&mut self, up: bool) {
+        tracing::info!("[relay] phone {}", if up { "joined the room" } else { "left the room" });
         if up {
             let first = !self.phone_up;
             self.phone_up = true;
@@ -466,7 +557,9 @@ impl Engine {
             // The relay socket can drop while media keeps flowing (iOS suspends it first); only
             // treat the phone as gone when there is no live media session either.
             let media_alive = self.last_media_rx.is_some_and(|t| t.elapsed() < Duration::from_secs(3));
-            if !media_alive {
+            if media_alive {
+                tracing::info!("[relay] relay dropped but media is still flowing; keeping the session");
+            } else {
                 self.conn_event(ConnEvent::PhoneLeft);
             }
         }
@@ -503,6 +596,11 @@ impl Engine {
 
     fn accept_offer(&mut self, sdp: &str) -> Result<String, String> {
         let offer = SdpOffer::from_sdp_string(sdp).map_err(|e| format!("bad offer: {e:?}"))?;
+        tracing::info!(
+            "[sdp] offer received ({} bytes); video-orientation (CVO) extension offered: {}",
+            sdp.len(),
+            sdp.contains("urn:3gpp:video-orientation")
+        );
         let fp = signal::fingerprint(sdp);
         let reuse = self.session.as_ref().is_some_and(|s| s.rtc.is_alive() && fp.is_some() && s.fingerprint == fp);
         if !reuse {
@@ -549,7 +647,17 @@ impl Engine {
             Event::IceConnectionStateChange(st) => {
                 tracing::info!("[ice] state -> {st:?}");
                 match st {
-                    IceConnectionState::Disconnected => self.conn_event(ConnEvent::HeartbeatLost),
+                    IceConnectionState::Disconnected => {
+                        // Media still flowing proves the path; a transient ICE flap (candidate
+                        // re-nomination, interface change) must not black out the picture.
+                        let media_alive = self.last_media_rx.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+                        if media_alive {
+                            tracing::info!("[ice] disconnected but media is still flowing; ignoring");
+                        } else {
+                            tracing::info!("[conn] ICE disconnected and no media; treating the link as lost");
+                            self.conn_event(ConnEvent::HeartbeatLost);
+                        }
+                    }
                     IceConnectionState::Connected | IceConnectionState::Completed => {
                         if matches!(self.conn.state(), ConnState::Reconnecting { .. }) {
                             // ICE is back; heartbeat/media will confirm. Probe right away.
@@ -578,6 +686,7 @@ impl Engine {
                 }
             }
             Event::MediaData(d) => self.on_media(d),
+            Event::Closed => tracing::info!("[rtc] session closed by the peer or the transport (DTLS/SCTP)"),
             Event::ChannelOpen(cid, label) => {
                 tracing::info!("[dc] open {label}");
                 if let Some(s) = self.session.as_mut() {
@@ -674,18 +783,38 @@ impl Engine {
                 self.conn_event(ConnEvent::MediaConnected);
                 self.maybe_path_event(false, None);
             }
-            Ctl::Paused { reason } => self.conn_event(ConnEvent::CameraPaused(*reason)),
-            Ctl::Resumed => self.conn_event(ConnEvent::CameraResumed),
-            Ctl::Set { .. } | Ctl::Caps { .. } => {}
+            Ctl::Paused { reason } => {
+                tracing::info!("[phone] camera paused: {reason:?}");
+                self.paused_since = Some(now);
+                self.conn_event(ConnEvent::CameraPaused(*reason));
+            }
+            Ctl::Resumed => {
+                tracing::info!("[phone] camera resumed");
+                self.paused_since = None;
+                self.conn_event(ConnEvent::CameraResumed);
+            }
+            Ctl::Caps { width, height, fps, rotation, current, .. } => {
+                tracing::info!("[phone] caps: track {width:?}x{height:?} @ {fps:?} fps, rotation hint {rotation:?}, lens {current}");
+            }
+            Ctl::Set { .. } => {}
         }
         self.emit(TransportEvent::Ctl(c));
     }
 
     fn on_media(&mut self, d: str0m::media::MediaData) {
         let now = Instant::now();
+        let gap = self.last_media_rx.map(|t| now.duration_since(t));
         self.last_media_rx = Some(now);
         let mut request = false;
         let Some(s) = self.session.as_mut() else { return };
+        if let Some(g) = gap.filter(|g| *g >= RESUME_GAP) {
+            // Media resumed after a stall (camera switch, Wi-Fi hiccup, app resume): the decoder
+            // may have released itself and the first frames are likely not decodable. PLI now
+            // instead of waiting for the next periodic keyframe.
+            tracing::info!("[rtc] media resumed after {} ms of silence; requesting a keyframe", g.as_millis());
+            s.need_key = true;
+            request = true;
+        }
         if s.first_au {
             s.first_au = false;
             tracing::info!("[rtc] first media data, {} bytes", d.data.len());
@@ -702,6 +831,11 @@ impl Engine {
                 request = true;
             }
         }
+        let rotation = d.ext_vals.video_orientation.map(cvo_degrees);
+        if self.last_cvo != Some(rotation) {
+            tracing::info!("[rtc] RTP video-orientation (CVO) from the phone: {rotation:?} deg clockwise");
+            self.last_cvo = Some(rotation);
+        }
         let key = d.is_keyframe();
         if key {
             if let Some(t) = s.pli_at.take() {
@@ -716,12 +850,49 @@ impl Engine {
         if !deliver {
             return;
         }
-        // A frame arriving while we were reconnecting means the media path is back.
-        if matches!(self.conn.state(), ConnState::Reconnecting { .. } | ConnState::Connecting) && key {
-            self.conn_event(ConnEvent::MediaConnected);
+        // A decodable frame arriving while we were reconnecting means the media path is back
+        // (waiting for the next keyframe would leave the "Reconnecting" picture up for seconds).
+        match self.conn.state() {
+            ConnState::Reconnecting { .. } => self.conn_event(ConnEvent::MediaConnected),
+            ConnState::Connecting if key => self.conn_event(ConnEvent::MediaConnected),
+            _ => {}
         }
         self.stats.access_units.fetch_add(1, Ordering::Relaxed);
-        self.emit(TransportEvent::AccessUnit { data: d.data.to_vec(), keyframe: key, rtp_ts: d.time.numer() as u32 });
+        let ts = d.time.numer();
+        self.win.aus += 1;
+        if key {
+            self.win.keys += 1;
+        }
+        if self.win.last_ts != Some(ts) {
+            self.win.frames += 1;
+            self.win.last_ts = Some(ts);
+        }
+        self.emit(TransportEvent::AccessUnit { data: d.data.to_vec(), keyframe: key, rtp_ts: ts as u32, rotation });
     }
 }
 
+
+/// RTP video-orientation to "degrees clockwise the receiver must rotate". libwebrtc/WebKit put 1 on
+/// the wire for "rotate 90 clockwise"; str0m names the wire value 1 `Deg270` and 3 `Deg90`.
+fn cvo_degrees(o: str0m::rtp::VideoOrientation) -> u16 {
+    use str0m::rtp::VideoOrientation::*;
+    match o {
+        Deg0 => 0,
+        Deg270 => 90,
+        Deg180 => 180,
+        Deg90 => 270,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cvo_wire_values_map_like_libwebrtc() {
+        use str0m::rtp::VideoOrientation;
+        // wire 0,1,2,3 -> render rotation 0,90,180,270 clockwise.
+        let by_wire: Vec<u16> = (0u8..4).map(|w| cvo_degrees(VideoOrientation::from(w))).collect();
+        assert_eq!(by_wire, vec![0, 90, 180, 270]);
+    }
+}

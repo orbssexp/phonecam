@@ -59,8 +59,26 @@ pub enum Ctl {
     },
     Paused { reason: PauseReason },
     Resumed,
-    /// Phone to desktop on DC open and after every lens switch.
-    Caps { lenses: Vec<LensInfo>, current: String, zoom_min: f32, zoom_max: f32, torch: bool },
+    /// Phone to desktop on DC open and after every applied `set`.
+    ///
+    /// `rotation`, `width`, `height` and `fps` are optional (older pages omit them): the rotation
+    /// in degrees clockwise the PC must apply for an upright picture (hint, used only when the RTP
+    /// video-orientation extension is not negotiated) and what `track.getSettings()` reports.
+    Caps {
+        lenses: Vec<LensInfo>,
+        current: String,
+        zoom_min: f32,
+        zoom_max: f32,
+        torch: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fps: Option<f32>,
+    },
 }
 
 #[cfg(test)]
@@ -119,12 +137,28 @@ mod tests {
                 current: "a".into(),
                 zoom_min: 1.0,
                 zoom_max: 10.0,
-                torch: true
+                torch: true,
+                rotation: None,
+                width: None,
+                height: None,
+                fps: None,
             }
         );
         assert_eq!(serde_json::to_string(&c).unwrap(), j);
         let k: Ctl = serde_json::from_str(r#"{"type":"caps","lenses":[],"current":"","zoom_min":1,"zoom_max":10,"torch":false}"#).unwrap();
         assert!(matches!(k, Ctl::Caps { zoom_max, .. } if zoom_max == 10.0));
+    }
+
+    #[test]
+    fn caps_with_stream_info_parses() {
+        let j = r#"{"type":"caps","lenses":[],"current":"","zoom_min":1,"zoom_max":1,"torch":false,"rotation":90,"width":1080,"height":1920,"fps":29.97}"#;
+        match serde_json::from_str::<Ctl>(j).unwrap() {
+            Ctl::Caps { rotation, width, height, fps, .. } => {
+                assert_eq!((rotation, width, height), (Some(90), Some(1080), Some(1920)));
+                assert!((fps.unwrap() - 29.97).abs() < 1e-3);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

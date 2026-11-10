@@ -79,6 +79,23 @@ mod tests {
     }
 
     #[test]
+    fn five_misses_tolerate_a_slow_camera_switch() {
+        // Engine setting: 2 s interval, limit 5 => Lost at 10 s. A pong at 8 s (page back after a
+        // ~7 s camera re-acquire) keeps the link.
+        let mut h = Heartbeat::new(2_000, 5, 0);
+        for t in [2_000, 4_000, 6_000, 8_000] {
+            assert_eq!(h.tick(t), Some(HbAction::SendPing { t }));
+        }
+        h.pong(8_000, 8_050);
+        assert_eq!(h.tick(10_000), Some(HbAction::SendPing { t: 10_000 }));
+        let mut h = Heartbeat::new(2_000, 5, 0);
+        for t in [2_000, 4_000, 6_000, 8_000] {
+            h.tick(t);
+        }
+        assert_eq!(h.tick(10_000), Some(HbAction::Lost));
+    }
+
+    #[test]
     fn pong_clears_misses_and_measures_rtt() {
         let mut h = Heartbeat::new(2_000, 3, 0);
         h.tick(2_000);

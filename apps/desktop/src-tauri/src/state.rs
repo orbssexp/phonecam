@@ -35,9 +35,20 @@ pub struct AppState {
     pub battery: Option<f32>,
     pub charging: Option<bool>,
     pub decoder_name: Option<String>,
+    /// Virtual-camera output size (fixed), not the stream size.
     pub fps: u32,
     pub width: u32,
     pub height: u32,
+    /// Decoded stream as measured on the PC (pre-rotation): size and decoded frames per second.
+    pub src_width: u32,
+    pub src_height: u32,
+    pub src_fps: u32,
+    /// What the phone's camera track reports (`Ctl::Caps`); 0 until known.
+    pub phone_width: u32,
+    pub phone_height: u32,
+    pub phone_fps: u32,
+    /// Automatic rotation currently applied (degrees clockwise): RTP orientation or phone hint.
+    pub auto_rotation: u16,
     pub lenses: Vec<LensInfo>,
     pub zoom_min: f32,
     pub zoom_max: f32,
@@ -59,6 +70,11 @@ pub struct View {
     pub zoom_min: f32,
     pub zoom_max: f32,
     pub torch_available: bool,
+    pub phone_width: u32,
+    pub phone_height: u32,
+    pub phone_fps: f32,
+    /// Rotation hint from `Ctl::Caps` (used when the stream carries no RTP orientation).
+    pub rotation_hint: u16,
     phone_joined: bool,
     caps_applied: bool,
 }
@@ -77,6 +93,10 @@ impl Default for View {
             zoom_min: 1.0,
             zoom_max: 1.0,
             torch_available: false,
+            phone_width: 0,
+            phone_height: 0,
+            phone_fps: 0.0,
+            rotation_hint: 0,
             phone_joined: false,
             caps_applied: false,
         }
@@ -106,6 +126,10 @@ impl View {
                 self.rtt_ms = None;
                 self.battery = None;
                 self.charging = None;
+                self.phone_width = 0;
+                self.phone_height = 0;
+                self.phone_fps = 0.0;
+                self.rotation_hint = 0;
                 if self.conn == ConnUi::Connecting {
                     self.conn = ConnUi::Idle;
                 }
@@ -136,7 +160,11 @@ impl View {
                 }
                 Ctl::Paused { reason } => self.pause_reason = Some(*reason),
                 Ctl::Resumed => self.pause_reason = None,
-                Ctl::Caps { lenses, current, zoom_min, zoom_max, torch } => {
+                Ctl::Caps { lenses, current, zoom_min, zoom_max, torch, rotation, width, height, fps } => {
+                    self.phone_width = width.unwrap_or(0);
+                    self.phone_height = height.unwrap_or(0);
+                    self.phone_fps = fps.unwrap_or(0.0);
+                    self.rotation_hint = rotation.unwrap_or(0);
                     self.lenses = lenses.clone();
                     self.current_lens = Some(current.clone());
                     self.zoom_min = *zoom_min;
@@ -171,6 +199,10 @@ mod tests {
             zoom_min: 1.0,
             zoom_max: 10.0,
             torch: true,
+            rotation: Some(90),
+            width: Some(1080),
+            height: Some(1920),
+            fps: Some(30.0),
         })
     }
 
@@ -201,6 +233,7 @@ mod tests {
         assert!(v.on_event(&caps()));
         assert!(!v.on_event(&caps()), "second caps (lens switch) must not re-apply");
         assert_eq!(v.zoom_range(), Some((1.0, 10.0)));
+        assert_eq!((v.phone_width, v.phone_height, v.phone_fps, v.rotation_hint), (1080, 1920, 30.0, 90));
         assert!(v.torch_available);
         v.on_event(&TransportEvent::PhoneLeft);
         v.on_event(&TransportEvent::PhoneJoined);
@@ -238,6 +271,13 @@ mod tests {
             fps: 30,
             width: 1,
             height: 2,
+            src_width: 3,
+            src_height: 4,
+            src_fps: 30,
+            phone_width: 5,
+            phone_height: 6,
+            phone_fps: 30,
+            auto_rotation: 0,
             lenses: vec![],
             zoom_min: 1.0,
             zoom_max: 2.0,
@@ -245,12 +285,13 @@ mod tests {
             settings: Settings::default(),
         };
         let j = serde_json::to_value(&s).unwrap();
-        for k in ["phoneUrl", "qrSvg", "conn", "pauseReason", "rttMs", "decoderName", "zoomMin", "torchAvailable", "settings"] {
+        for k in ["phoneUrl", "qrSvg", "conn", "pauseReason", "rttMs", "decoderName", "zoomMin", "torchAvailable", "settings", "srcWidth", "srcHeight", "srcFps", "phoneWidth", "phoneHeight", "phoneFps", "autoRotation"] {
             assert!(j.get(k).is_some(), "{k}");
         }
         assert_eq!(j["conn"], "live");
         assert_eq!(j["path"], "lan");
         assert_eq!(j["settings"]["profile"], "balanced");
         assert_eq!(j["settings"]["decoder"], "auto");
+        assert_eq!(j["settings"]["rotation"], 0);
     }
 }

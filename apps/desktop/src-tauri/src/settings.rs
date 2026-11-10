@@ -33,11 +33,21 @@ pub struct Settings {
     pub torch: bool,
     pub mirror: bool,
     pub decoder: Decoder,
+    /// Extra rotation in degrees clockwise (0/90/180/270), applied on top of the automatic one.
+    pub rotation: u16,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { lens: None, profile: Profile::Balanced, zoom: 1.0, torch: false, mirror: false, decoder: Decoder::Auto }
+        Self {
+            lens: None,
+            profile: Profile::Balanced,
+            zoom: 1.0,
+            torch: false,
+            mirror: false,
+            decoder: Decoder::Auto,
+            rotation: 0,
+        }
     }
 }
 
@@ -52,6 +62,7 @@ pub struct SettingsPatch {
     pub torch: Option<bool>,
     pub mirror: Option<bool>,
     pub decoder: Option<Decoder>,
+    pub rotation: Option<u16>,
 }
 
 fn some_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
@@ -71,6 +82,7 @@ pub struct Diff {
     pub torch: bool,
     pub mirror: bool,
     pub decoder: bool,
+    pub rotation: bool,
 }
 
 impl Diff {
@@ -109,6 +121,11 @@ impl Settings {
         if let Some(v) = p.decoder {
             d.decoder = self.decoder != v;
             self.decoder = v;
+        }
+        if let Some(v) = p.rotation.filter(|r| r % 90 == 0) {
+            let v = v % 360;
+            d.rotation = self.rotation != v;
+            self.rotation = v;
         }
         d
     }
@@ -223,6 +240,24 @@ mod tests {
         let p: SettingsPatch = serde_json::from_str(r#"{"lens":"x","decoder":"cuda"}"#).unwrap();
         assert_eq!(p.lens, Some(Some("x".into())));
         assert_eq!(p.decoder, Some(Decoder::Cuda));
+    }
+
+    #[test]
+    fn rotation_defaults_to_zero_and_only_takes_quarter_turns() {
+        // Old settings.json without the key still loads.
+        let s: Settings = serde_json::from_str(r#"{"profile":"quality"}"#).unwrap();
+        assert_eq!(s.rotation, 0);
+        let mut s = Settings::default();
+        let d = s.apply(SettingsPatch { rotation: Some(90), ..Default::default() }, None);
+        assert!(d.rotation && !d.any_phone());
+        assert_eq!(s.rotation, 90);
+        s.apply(SettingsPatch { rotation: Some(450), ..Default::default() }, None);
+        assert_eq!(s.rotation, 90);
+        let d = s.apply(SettingsPatch { rotation: Some(45), ..Default::default() }, None);
+        assert!(!d.rotation);
+        assert_eq!(s.rotation, 90);
+        s.apply(SettingsPatch { rotation: Some(360), ..Default::default() }, None);
+        assert_eq!(s.rotation, 0);
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod font;
 pub mod letterbox;
 pub mod placeholder;
 pub mod preview;
+pub mod rotate;
 
 use std::ffi::{c_char, c_void, CStr};
 use std::fmt;
@@ -92,8 +93,17 @@ impl StatsState {
         }
     }
 
+    /// Counts one DECODED frame (called once per frame the decoder returns, nowhere else).
     fn record_frame(&mut self, w: u32, h: u32) {
         let now = Instant::now();
+        // After a pause the window would span the silence and under-report: start afresh.
+        if self
+            .last_frame_at
+            .is_none_or(|t| now.duration_since(t) > Duration::from_millis(1500))
+        {
+            self.interval_start = now;
+            self.frames_in_interval = 0;
+        }
         self.w = w;
         self.h = h;
         self.last_frame_at = Some(now);
@@ -253,8 +263,26 @@ pub struct MediaHandle {
     latest_frame: Arc<Mutex<Option<LatestFrame>>>,
     shutdown_flag: Arc<AtomicBool>,
     mirror: Arc<AtomicBool>,
+    rotation: Arc<Rotation>,
+    need_keyframe: Arc<AtomicBool>,
     preview: Arc<PreviewDemand>,
     worker_thread: Option<JoinHandle<()>>,
+}
+
+/// Rotation applied to the decoded picture: `auto` (from the stream: RTP video-orientation or the
+/// phone's hint) plus `manual` (the user's Rotate button), both degrees clockwise.
+#[derive(Default)]
+struct Rotation {
+    auto: std::sync::atomic::AtomicU32,
+    manual: std::sync::atomic::AtomicU32,
+}
+
+impl Rotation {
+    fn total(&self) -> u16 {
+        let a = self.auto.load(Ordering::Relaxed) as i32;
+        let m = self.manual.load(Ordering::Relaxed) as i32;
+        rotate::normalize_deg(a + m)
+    }
 }
 
 /// Tracks whether anyone is looking at the preview, so the media thread only keeps a copy of the
@@ -310,6 +338,23 @@ impl MediaHandle {
     /// Horizontally flips the camera output (applied after letterboxing). Takes effect on the next frame.
     pub fn set_mirror(&self, on: bool) {
         self.mirror.store(on, Ordering::Relaxed);
+    }
+
+    /// User rotation in degrees clockwise (0/90/180/270), applied on top of the automatic one,
+    /// before letterboxing. Takes effect on the next frame.
+    pub fn set_rotation(&self, deg: u16) {
+        self.rotation.manual.store(rotate::normalize_deg(deg as i32) as u32, Ordering::Relaxed);
+    }
+
+    /// Automatic rotation (RTP video-orientation, or the phone's hint) in degrees clockwise.
+    pub fn set_auto_rotation(&self, deg: u16) {
+        self.rotation.auto.store(rotate::normalize_deg(deg as i32) as u32, Ordering::Relaxed);
+    }
+
+    /// True (once) when the decoder is closed or broken and needs a keyframe to continue; the
+    /// caller should send a PLI.
+    pub fn take_keyframe_request(&self) -> bool {
+        self.need_keyframe.swap(false, Ordering::Relaxed)
     }
 
     /// Switches the decoder preference at runtime. The softcam device is kept; only the
@@ -376,6 +421,10 @@ impl Media {
         let shutdown_clone = Arc::clone(&shutdown_flag);
         let mirror = Arc::new(AtomicBool::new(false));
         let mirror_clone = Arc::clone(&mirror);
+        let rotation = Arc::new(Rotation::default());
+        let rotation_clone = Arc::clone(&rotation);
+        let need_keyframe = Arc::new(AtomicBool::new(false));
+        let need_keyframe_clone = Arc::clone(&need_keyframe);
         let preview = Arc::new(PreviewDemand::new());
         let preview_clone = Arc::clone(&preview);
 
@@ -391,6 +440,8 @@ impl Media {
                     latest_clone,
                     shutdown_clone,
                     mirror_clone,
+                    rotation_clone,
+                    need_keyframe_clone,
                     preview_clone,
                 );
             })
@@ -402,6 +453,8 @@ impl Media {
             latest_frame,
             shutdown_flag,
             mirror,
+            rotation,
+            need_keyframe,
             preview,
             worker_thread: Some(worker_thread),
         }
@@ -457,6 +510,8 @@ fn run_media_loop(
     latest_frame: Arc<Mutex<Option<LatestFrame>>>,
     shutdown_flag: Arc<AtomicBool>,
     mirror: Arc<AtomicBool>,
+    rotation: Arc<Rotation>,
+    need_keyframe: Arc<AtomicBool>,
     preview: Arc<PreviewDemand>,
 ) {
     let mut decoder_pref = decoder_pref;
@@ -483,6 +538,10 @@ fn run_media_loop(
     let mut scaler: Option<ScalerWrapper> = None;
     let mut decode_errors = 0;
     let mut total_frames_decoded = 0u64;
+    let mut frames_window = 0u64;
+    let mut last_res = (0u32, 0u32);
+    let mut rot_buf: Vec<u8> = Vec::new();
+    let mut last_log = Instant::now();
 
     let mut last_tick = Instant::now();
     let tick_interval = Duration::from_millis(200); // 5 fps placeholder interval
@@ -510,6 +569,8 @@ fn run_media_loop(
                     ci = 0;
                     dec = None;
                     dec_buf = Vec::new();
+                    rot_buf = Vec::new();
+                    last_res = (0, 0);
                     direct_ok = false;
                     scaler = None;
                     decode_errors = 0;
@@ -537,6 +598,8 @@ fn run_media_loop(
                 // The decoder is torn down when the stream stops; reopen only on a keyframe so the
                 // hardware-fallback logic never mistakes missing reference frames for a broken decoder.
                 if dec.is_none() && !au.keyframe {
+                    // Nothing to decode with: ask the transport for a keyframe (PLI).
+                    need_keyframe.store(true, Ordering::Relaxed);
                     continue;
                 }
                 // Initialize decoder lazily
@@ -565,7 +628,8 @@ fn run_media_loop(
                     let mut h = 0i32;
                     let mut hw = 0i32;
 
-                    let direct = direct_ok && current_vcam_frame == VcamFrame::Camera;
+                    let rot = rotation.total();
+                    let direct = direct_ok && current_vcam_frame == VcamFrame::Camera && rot == 0;
                     if !direct && dec_buf.is_empty() {
                         dec_buf = vec![0u8; DEC_BUF_BYTES];
                     }
@@ -599,13 +663,33 @@ fn run_media_loop(
                             direct_ok = false;
                             ci += 1;
                             decode_errors = 0;
+                        } else if decode_errors >= 30 && total_frames_decoded > 0 {
+                            // Was working, now every AU fails (e.g. a resolution switch the decoder
+                            // could not follow): reopen on the next keyframe and ask for one.
+                            tracing::warn!("[media] {decode_errors} decode errors in a row; reopening decoder");
+                            dec = None;
+                            dec_buf = Vec::new();
+                            scaler = None;
+                            last_res = (0, 0);
+                            direct_ok = false;
+                            decode_errors = 0;
+                            total_frames_decoded = 0;
+                            need_keyframe.store(true, Ordering::Relaxed);
                         }
                     } else if n > 0 && w > 0 && h > 0 {
                         decode_errors = 0;
                         total_frames_decoded += n as u64;
+                        frames_window += n as u64;
 
                         if let Ok(mut s) = stats.lock() {
                             s.record_frame(w as u32, h as u32);
+                        }
+                        if last_res != (w as u32, h as u32) {
+                            tracing::info!(
+                                "[media] decoded stream {}x{} (was {}x{}), rotation {rot} deg, decoder {}",
+                                w, h, last_res.0, last_res.1, d.name()
+                            );
+                            last_res = (w as u32, h as u32);
                         }
 
                         // If VcamFrame is Camera, scale and send to softcam!
@@ -624,7 +708,26 @@ fn run_media_loop(
                             update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
                             last_tick = Instant::now();
                         } else if current_vcam_frame == VcamFrame::Camera {
-                            let rect = calculate_letterbox(w as u32, h as u32, out_w, out_h);
+                            // Rotate (auto + manual) before letterboxing.
+                            let need = w as usize * h as usize * 3;
+                            let (sw, sh) = if rot == 0 {
+                                rot_buf = Vec::new();
+                                (w as u32, h as u32)
+                            } else {
+                                if rot_buf.len() < need {
+                                    rot_buf.resize(need, 0);
+                                }
+                                rotate::rotate_bgr(
+                                    &dec_buf[..need],
+                                    w as u32,
+                                    h as u32,
+                                    rot,
+                                    &mut rot_buf[..need],
+                                )
+                            };
+                            let src: &[u8] = if rot == 0 { &dec_buf } else { &rot_buf };
+
+                            let rect = calculate_letterbox(sw, sh, out_w, out_h);
 
                             if rect.scaled_w != out_w || rect.scaled_h != out_h {
                                 out_buf.fill(0);
@@ -632,8 +735,8 @@ fn run_media_loop(
 
                             let need_new_scaler = match &scaler {
                                 Some(s) => {
-                                    s.src_w != w as u32
-                                        || s.src_h != h as u32
+                                    s.src_w != sw
+                                        || s.src_h != sh
                                         || s.dst_w != rect.scaled_w
                                         || s.dst_h != rect.scaled_h
                                 }
@@ -641,8 +744,8 @@ fn run_media_loop(
                             };
                             if need_new_scaler {
                                 scaler = Some(ScalerWrapper::new(
-                                    w as u32,
-                                    h as u32,
+                                    sw,
+                                    sh,
                                     rect.scaled_w,
                                     rect.scaled_h,
                                 ));
@@ -653,7 +756,7 @@ fn run_media_loop(
                                     ((rect.offset_y * out_w + rect.offset_x) * 3) as usize;
                                 let dst_ptr = unsafe { out_buf.as_mut_ptr().add(dst_offset) };
                                 let dst_stride = (out_w * 3) as i32;
-                                s.scale(dec_buf.as_ptr(), w * 3, dst_ptr, dst_stride, h);
+                                s.scale(src.as_ptr(), (sw * 3) as i32, dst_ptr, dst_stride, sh as i32);
                             }
 
                             if mirror.load(Ordering::Relaxed) {
@@ -662,7 +765,7 @@ fn run_media_loop(
                             cam.send_frame(&out_buf);
                             update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
                             last_tick = Instant::now();
-                            if (w as u32, h as u32) == (out_w, out_h) {
+                            if rot == 0 && (w as u32, h as u32) == (out_w, out_h) {
                                 direct_ok = true;
                                 dec_buf = Vec::new();
                             }
@@ -673,9 +776,11 @@ fn run_media_loop(
             None => {
                 // Timeout elapsed (no AU arrived or not streaming)
                 if dec.is_some() && last_au_at.elapsed() >= DEC_IDLE_TEARDOWN {
-                    tracing::info!("Stream idle, releasing decoder");
+                    tracing::info!("[media] stream idle for 3 s, releasing decoder");
                     dec = None;
                     dec_buf = Vec::new();
+                    rot_buf = Vec::new();
+                    last_res = (0, 0);
                     direct_ok = false;
                     scaler = None;
                     decode_errors = 0;
@@ -689,6 +794,24 @@ fn run_media_loop(
                     last_tick = Instant::now();
                 }
             }
+        }
+
+        if last_log.elapsed() >= Duration::from_secs(10) {
+            let secs = last_log.elapsed().as_secs_f32();
+            if dec.is_some() || frames_window > 0 {
+                tracing::info!(
+                    "[media] last {:.0}s: decoded {} frames ({:.1}/s), stream {}x{}, rotation {} deg, decoder {}",
+                    secs,
+                    frames_window,
+                    frames_window as f32 / secs,
+                    last_res.0,
+                    last_res.1,
+                    rotation.total(),
+                    dec.as_ref().map(|d| d.name()).unwrap_or_else(|| "closed".into()),
+                );
+            }
+            frames_window = 0;
+            last_log = Instant::now();
         }
     }
 }

@@ -52,7 +52,10 @@ pub enum TransportEvent {
     /// DTLS is up, or media/heartbeat resumed after a loss.
     MediaConnected,
     /// One complete H.264 access unit (Annex B), starting at a keyframe.
-    AccessUnit { data: Vec<u8>, keyframe: bool, rtp_ts: u32 },
+    ///
+    /// `rotation` is the RTP video-orientation (CVO) the sender attached, as degrees clockwise the
+    /// receiver must rotate for an upright picture; `None` when the extension was not negotiated.
+    AccessUnit { data: Vec<u8>, keyframe: bool, rtp_ts: u32, rotation: Option<u16> },
     /// Control message from the phone (pong, paused, resumed, ...).
     Ctl(Ctl),
     /// Selected ICE pair changed, or the measured RTT moved. `rtt_ms` is 0 until measured.

@@ -1,6 +1,7 @@
 //! PhoneCam desktop app. Rust owns transport + media + settings; the webview is a thin view over
 //! the IPC below. No video frames cross IPC except the (<= 15 fps, 640 px) preview JPEG.
 
+mod logging;
 mod settings;
 mod state;
 
@@ -11,7 +12,7 @@ use phonecam_transport::{Config, Receiver, ReceiverHandle, TransportEvent};
 use settings::{Diff, Pairing, Settings, SettingsPatch};
 use state::{AppState, View};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -41,6 +42,10 @@ pub struct Shared {
     media: MediaHandle,
     /// Bumped on every receiver (re)start so a stale event thread stops.
     generation: AtomicU64,
+    /// Last RTP video-orientation seen on the stream (degrees clockwise), -1 when none.
+    cvo: AtomicI32,
+    /// Rotation hint from the phone's caps, used only while `cvo` is -1.
+    rot_hint: AtomicU32,
     inner: Mutex<Inner>,
 }
 
@@ -51,6 +56,7 @@ impl Shared {
         let pairing = settings::load_or_create_pairing(&dir);
         let media = Media::start(settings.decoder.pref(), VCAM_SIZE);
         media.set_mirror(settings.mirror);
+        media.set_rotation(settings.rotation);
         let relay_url = std::env::var("PHONECAM_RELAY").unwrap_or_else(|_| DEFAULT_RELAY.into());
         let page_url = std::env::var("PHONECAM_PAGE").unwrap_or_else(|_| DEFAULT_PAGE.into());
         let shared = Arc::new(Shared {
@@ -59,6 +65,8 @@ impl Shared {
             page_url,
             media,
             generation: AtomicU64::new(0),
+            cvo: AtomicI32::new(-1),
+            rot_hint: AtomicU32::new(0),
             inner: Mutex::new(Inner {
                 settings,
                 pairing,
@@ -90,6 +98,14 @@ impl Shared {
         inner.phone_url = cfg.phone_url();
         inner.qr_svg = state::qr_svg(&inner.phone_url);
         inner.view = View::default();
+        self.cvo.store(-1, Ordering::Relaxed);
+        self.rot_hint.store(0, Ordering::Relaxed);
+        self.media.set_auto_rotation(0);
+        // Only a short room prefix is logged; never the secret or the full URL.
+        tracing::info!(
+            "[app] starting receiver for room {}...",
+            inner.pairing.room_id.chars().take(6).collect::<String>()
+        );
         let (handle, rx) = Receiver::start(cfg);
         inner.recv = Some(handle);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -112,7 +128,11 @@ impl Shared {
 
     fn handle_event(&self, ev: TransportEvent) {
         match ev {
-            TransportEvent::AccessUnit { data, keyframe, .. } => {
+            TransportEvent::AccessUnit { data, keyframe, rotation, .. } => {
+                let cvo = rotation.map_or(-1, i32::from);
+                if self.cvo.swap(cvo, Ordering::Relaxed) != cvo {
+                    self.apply_auto_rotation();
+                }
                 self.media.push_au_arc(Arc::from(data), keyframe);
             }
             ev => {
@@ -121,11 +141,39 @@ impl Shared {
                 }
                 let mut g = self.lock();
                 let first_caps = g.view.on_event(&ev);
-                if let TransportEvent::Ctl(Ctl::Caps { current, .. }) = &ev {
-                    self.sync_after_caps(&mut g, current, first_caps);
+                match &ev {
+                    TransportEvent::Ctl(Ctl::Caps { current, .. }) => {
+                        self.rot_hint.store(u32::from(g.view.rotation_hint), Ordering::Relaxed);
+                        self.apply_auto_rotation();
+                        self.sync_after_caps(&mut g, current, first_caps);
+                    }
+                    TransportEvent::PhoneLeft => {
+                        self.cvo.store(-1, Ordering::Relaxed);
+                        self.rot_hint.store(0, Ordering::Relaxed);
+                        self.apply_auto_rotation();
+                    }
+                    _ => {}
                 }
             }
         }
+    }
+
+    /// Automatic rotation = the stream's RTP orientation when it carries one, else the phone's hint.
+    fn auto_rotation(&self) -> u16 {
+        match self.cvo.load(Ordering::Relaxed) {
+            c if c >= 0 => c as u16,
+            _ => self.rot_hint.load(Ordering::Relaxed) as u16,
+        }
+    }
+
+    fn apply_auto_rotation(&self) {
+        let r = self.auto_rotation();
+        tracing::info!(
+            "[app] automatic rotation now {r} deg (stream orientation {}, phone hint {})",
+            self.cvo.load(Ordering::Relaxed),
+            self.rot_hint.load(Ordering::Relaxed)
+        );
+        self.media.set_auto_rotation(r);
     }
 
     /// Phone reported its capabilities. First time in a session: push our persisted settings.
@@ -139,11 +187,21 @@ impl Shared {
         if first {
             if let Some(h) = &g.recv {
                 let mut ctl = g.settings.ctl_set(Diff::default(), true);
-                if let Ctl::Set { lens, .. } = &mut ctl {
+                let phone_size = (g.view.phone_width, g.view.phone_height);
+                if let Ctl::Set { lens, profile, .. } = &mut ctl {
                     if !known || lens.as_deref() == Some(current) {
                         *lens = None;
                     }
+                    // The phone already delivers this profile's size: do not make it re-acquire
+                    // the camera (which stalls the video for seconds on iOS) for nothing.
+                    if let Some(p) = *profile {
+                        let m = p.mode();
+                        if phone_size == (m.width, m.height) || phone_size == (m.height, m.width) {
+                            *profile = None;
+                        }
+                    }
                 }
+                tracing::info!("[app] first caps of the session: pushing saved settings {ctl:?}");
                 h.send_ctl(ctl);
             }
         }
@@ -155,6 +213,7 @@ impl Shared {
 
     fn snapshot(&self) -> AppState {
         let stats = self.media.stats();
+        let auto_rotation = self.auto_rotation();
         let g = self.lock();
         let v = &g.view;
         AppState {
@@ -168,8 +227,15 @@ impl Shared {
             charging: v.charging,
             decoder_name: (stats.decoder_name != "none").then_some(stats.decoder_name),
             fps: stats.fps.round() as u32,
-            width: stats.w,
-            height: stats.h,
+            width: VCAM_SIZE.0,
+            height: VCAM_SIZE.1,
+            src_width: stats.w,
+            src_height: stats.h,
+            src_fps: stats.fps.round() as u32,
+            phone_width: v.phone_width,
+            phone_height: v.phone_height,
+            phone_fps: v.phone_fps.round() as u32,
+            auto_rotation,
             lenses: v.lenses.clone(),
             zoom_min: v.zoom_min,
             zoom_max: v.zoom_max,
@@ -189,6 +255,10 @@ impl Shared {
             }
             if d.decoder {
                 self.media.set_decoder(g.settings.decoder.pref());
+            }
+            if d.rotation {
+                tracing::info!("[app] manual rotation set to {} deg", g.settings.rotation);
+                self.media.set_rotation(g.settings.rotation);
             }
             if d.any_phone() {
                 if let Some(h) = &g.recv {
@@ -214,7 +284,18 @@ impl Shared {
         Some(base64::engine::general_purpose::STANDARD.encode(jpeg))
     }
 
+    /// The decoder asked for a keyframe (closed after a stall, or lost sync): send a PLI.
+    fn poll_keyframe_request(&self, last: &mut std::time::Instant) {
+        if self.media.take_keyframe_request() && last.elapsed() >= Duration::from_secs(1) {
+            *last = std::time::Instant::now();
+            if let Some(h) = &self.lock().recv {
+                h.request_keyframe();
+            }
+        }
+    }
+
     fn shutdown(&self) {
+        tracing::info!("[app] shutting down");
         if let Some(h) = self.lock().recv.take() {
             h.shutdown();
         }
@@ -294,8 +375,10 @@ fn spawn_state_emitter(app: AppHandle, shared: Arc<Shared>) {
         .name("phonecam-state".into())
         .spawn(move || {
             let mut last: Option<AppState> = None;
+            let mut last_pli = std::time::Instant::now();
             loop {
                 std::thread::sleep(Duration::from_millis(250));
+                shared.poll_keyframe_request(&mut last_pli);
                 let now = shared.snapshot();
                 if last.as_ref() != Some(&now) {
                     let _ = app.emit("state", &now);
@@ -307,6 +390,7 @@ fn spawn_state_emitter(app: AppHandle, shared: Arc<Shared>) {
 }
 
 pub fn run() {
+    logging::init(&settings::data_dir());
     let shared = Shared::new();
     let for_exit = Arc::clone(&shared);
 
