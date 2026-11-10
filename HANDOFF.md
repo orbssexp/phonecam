@@ -125,3 +125,6 @@ build, pairs by scanning the desktop QR in the app. Then debug from `phonecam.lo
 lines). Known: desktop handshake timeout 5 s (phone 10 s); while native owns the session WebRTC
 events are dropped. agy was blocked by the auto-mode classifier (skip-permissions flag) this round.
 Round I list is in the contracts doc.
+
+
+> **Newer state:** read `docs/HANDOFF-2026-11-10.md` first (end of session 2026-11-10, checklists, lost HF2 work).
