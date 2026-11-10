@@ -1,0 +1,37 @@
+--- a/src/softcam/softcam.cpp
++++ b/src/softcam/softcam.cpp
+@@ -10,8 +10,8 @@
+-// {AEF3B972-5FA5-4647-9571-358EB472BC9E}
+-DEFINE_GUID(CLSID_DShowSoftcam,
+-0xaef3b972, 0x5fa5, 0x4647, 0x95, 0x71, 0x35, 0x8e, 0xb4, 0x72, 0xbc, 0x9e);
++// {4CD75097-5A06-4341-9D29-8C12662AC2C0}
++DEFINE_GUID(CLSID_DShowSoftcam,
++0x4cd75097, 0x5a06, 0x4341, 0x9d, 0x29, 0x8c, 0x12, 0x66, 0x2a, 0xc2, 0xc0);
+ 
+ 
+ namespace {
+ 
+ // Setup data
+ 
+-const wchar_t FILTER_NAME[] = L"DirectShow Softcam";
++const wchar_t FILTER_NAME[] = L"PhoneCam";
+ const GUID &FILTER_CLASSID = CLSID_DShowSoftcam;
+--- a/src/softcamcore/DShowSoftcam.cpp
++++ b/src/softcamcore/DShowSoftcam.cpp
+@@ -167,2 +167,2 @@ Softcam::Softcam(LPUNKNOWN lpunk, const GUID& clsid, HRESULT *phr) :
+-    CSource(NAME("DirectShow Softcam"), lpunk, clsid),
++    CSource(NAME("PhoneCam"), lpunk, clsid),
+     m_frame_buffer(FrameBuffer::open()),
+@@ -178,1 +178,1 @@ Softcam::Softcam(LPUNKNOWN lpunk, const GUID& clsid, HRESULT *phr) :
+-    (void)new SoftcamStream(phr, this, L"DirectShow Softcam Stream");
++    (void)new SoftcamStream(phr, this, L"PhoneCam Stream");
+@@ -371,1 +371,1 @@ SoftcamStream::SoftcamStream(HRESULT *phr,
+-    CSourceStream(NAME("DirectShow Softcam Stream"), phr, pParent, pPinName),
++    CSourceStream(NAME("PhoneCam Stream"), phr, pParent, pPinName),
+--- a/src/softcamcore/FrameBuffer.cpp
++++ b/src/softcamcore/FrameBuffer.cpp
+@@ -10,2 +10,2 @@ namespace softcam {
+-const char NamedMutexName[] = "DirectShow Softcam/NamedMutex";
+-const char SharedMemoryName[] = "DirectShow Softcam/SharedMemory";
++const char NamedMutexName[] = "PhoneCam/NamedMutex";
++const char SharedMemoryName[] = "PhoneCam/SharedMemory";

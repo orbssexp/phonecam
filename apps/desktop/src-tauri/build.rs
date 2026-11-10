@@ -7,7 +7,7 @@ fn main() {
         r"C:\Users\gusta\orca\projects\phone-cam\spike\vendor\ffmpeg\ffmpeg-n7.1.5-12-g1fdbca85aa-win64-lgpl-shared-7.1".into()
     });
     let softcam_dir = std::env::var("SOFTCAM_DIR").unwrap_or_else(|_| {
-        r"C:\Users\gusta\orca\projects\phone-cam\spike\vendor\softcam-src\src\softcam\dist".into()
+        r"C:\Users\gusta\orca\projects\phone-cam\spike\vendor\softcam-phonecam".into()
     });
 
     let vendor = PathBuf::from("vendor");

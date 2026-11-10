@@ -2,7 +2,7 @@ fn main() {
     let default_ffmpeg = r"C:\Users\gusta\orca\projects\phone-cam\spike\vendor\ffmpeg\ffmpeg-n7.1.5-12-g1fdbca85aa-win64-lgpl-shared-7.1";
     let ffmpeg_dir = std::env::var("FFMPEG_DIR").unwrap_or_else(|_| default_ffmpeg.to_string());
 
-    let default_softcam = r"C:\Users\gusta\orca\projects\phone-cam\spike\vendor\softcam-src\src\softcam\dist";
+    let default_softcam = r"C:\Users\gusta\orca\projects\phone-cam\spike\vendor\softcam-phonecam";
     let softcam_dir = std::env::var("SOFTCAM_DIR").unwrap_or_else(|_| default_softcam.to_string());
 
     if std::env::var_os("LIBCLANG_PATH").is_none() {
