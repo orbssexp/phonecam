@@ -70,3 +70,20 @@ Relay DNS live → user runs the relay command and scans the QR on the iPhone �
 - Root cause of "phone live / desktop reconnecting": no inbound firewall rule for phonecam.exe on a Public network. Installer now adds it (netsh, UDP in) and swaps an in-use softcam.dll by renaming it (no need to close Brave etc.). User reinstalled over the old one → iPhone connects, vcam "PhoneCam" registered.
 - User-found bugs, now "Round G" in plans/2026-10-30-mvp-contracts.md: sideways video + no rotate control; 4K shows 1080; unstable/disconnects; fps display wrong (60). App has NO log file yet → G1 adds %APPDATA%\PhoneCam\phonecam.log; instability can only be diagnosed from that log after the user's next real session.
 - Next: G1 Sonnet (engine), G2 agy (UI), G3 agy (page) in worktrees ../phonecam-wt-g1..g3 (branches fin/g1-engine, fin/g2-ui, fin/g3-page) → verify (tests, clippy, scripts/dev/e2e.sh with CAM=PhoneCam) → merge → `npm run tauri build` → user reinstalls over the top → user tests → read phonecam.log for disconnect causes.
+
+## Update 2026-11-10 (Round G merged)
+
+Done: G1 (engine: `phonecam.log`, rotation auto CVO + manual, real stream stats, heartbeat/resume
+tolerance), G2 (UI: Rotate button, rows "Phone sends / Received / Camera output"), G3 (page: caps with
+width/height/fps/rotation, exact constraints, no fake 60 fps) merged into `main` (440b1cd).
+Checked: 91 tests pass, clippy 0 errors, installer built
+(`target/release/bundle/nsis/PhoneCam_0.1.0_x64-setup.exe`). Fake-phone e2e was SKIPPED for this build
+because the user's installed app was running; Round G is unverified on a real iPhone.
+
+Pending (start a fresh session):
+1. User installs over the top (no uninstall, no closing apps) and tests with the iPhone: rotation,
+   4K, fps rows, stability.
+2. Read `%APPDATA%\PhoneCam\phonecam.log` (parse with agy) to find the real disconnect cause; fix.
+3. Known unfixed: if str0m closes the session (DTLS close_notify / SCTP lost) the page needs a reload.
+4. Unverified on hardware: Wi-Fi -> USB failover, lock/call recovery, PC-side lens/zoom/torch/mirror.
+5. Cleanup: worktrees `phonecam-wt-*`, `git stash drop` (stash@{0} is a stray duplicate, do not apply).
