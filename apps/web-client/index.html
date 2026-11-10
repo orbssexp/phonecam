@@ -310,9 +310,7 @@
       <select id="res" aria-label="Resolution and frame rate">
         <option value="1920x1080@30">1080p30</option>
         <option value="1280x720@30">720p30</option>
-        <option value="1920x1080@60">1080p60</option>
         <option value="3840x2160@30">4K30</option>
-        <option value="640x480@30">480p30</option>
       </select>
     </div>
 
@@ -532,20 +530,40 @@ function parseRes(){
   return { w: +m[1], h: +m[2], f: +m[3] };
 }
 
+async function acquireCamera(r, deviceId){
+  var minDim = Math.min(r.w, r.h);
+  var attempts = [
+    { width: { ideal: r.w, min: r.w }, height: { ideal: r.h, min: r.h }, frameRate: { ideal: r.f } },
+    { width: { ideal: r.w, min: minDim }, height: { ideal: r.h, min: minDim }, frameRate: { ideal: r.f } },
+    { width: { ideal: r.w }, height: { ideal: r.h }, frameRate: { ideal: r.f } }
+  ];
+  var s = null, lastErr = null;
+  for (var i = 0; i < attempts.length; i++) {
+    var vc = attempts[i];
+    if (deviceId) {
+      vc.deviceId = { exact: deviceId };
+    } else {
+      vc.facingMode = { ideal: 'environment' };
+    }
+    try {
+      s = await navigator.mediaDevices.getUserMedia({ video: vc, audio: false });
+      break;
+    } catch(err) {
+      lastErr = err;
+      log('getUserMedia attempt ' + (i + 1) + ' failed: ' + err);
+    }
+  }
+  if (!s) throw lastErr || new Error('getUserMedia failed');
+  return s;
+}
+
 async function getCam(){
   var r = parseRes();
-  var vc = { width: { ideal: r.w }, height: { ideal: r.h }, frameRate: { ideal: r.f } };
-  if ($('lens').value) {
-    vc.deviceId = { exact: $('lens').value };
-  } else {
-    vc.facingMode = { ideal: 'environment' };
-  }
-
   if (stream) {
     stream.getTracks().forEach(function(t){ t.stop(); });
   }
 
-  stream = await navigator.mediaDevices.getUserMedia({ video: vc, audio: false });
+  stream = await acquireCamera(r, $('lens').value);
   track = stream.getVideoTracks()[0];
   $('v').srcObject = stream;
 
@@ -555,8 +573,7 @@ async function getCam(){
   if (!hasUserSelectedLens && $('lens').value && track.getSettings().deviceId !== $('lens').value) {
     log('switching to default Back Dual Wide Camera: ' + $('lens').value);
     stream.getTracks().forEach(function(t){ t.stop(); });
-    vc.deviceId = { exact: $('lens').value };
-    stream = await navigator.mediaDevices.getUserMedia({ video: vc, audio: false });
+    stream = await acquireCamera(r, $('lens').value);
     track = stream.getVideoTracks()[0];
     $('v').srcObject = stream;
   }
@@ -564,6 +581,12 @@ async function getCam(){
   updateTrackDiagnostics();
   updateTorchSupport();
   updateZoomSupport();
+
+  var st = (track && track.getSettings) ? track.getSettings() : {};
+  log('real getSettings: ' + JSON.stringify(st));
+  if (st.width && st.height && (st.width < r.w || st.height < r.h)) {
+    log('real size ' + st.width + 'x' + st.height + ' lower than requested ' + r.w + 'x' + r.h + ' — keeping going');
+  }
 
   track.onended = function(){ log('track ended'); };
   track.onmute = function(){ log('track muted'); };
@@ -680,7 +703,19 @@ async function applyBitrate(){
   }
 }
 
-// Contract D: {type:'caps', lenses, current, zoom_min, zoom_max, torch}
+function getRotation(){
+  if (window.screen && window.screen.orientation && typeof window.screen.orientation.angle === 'number') {
+    var a = (window.screen.orientation.angle % 360 + 360) % 360;
+    if (a === 0 || a === 90 || a === 180 || a === 270) return a;
+  }
+  if (typeof window.orientation === 'number') {
+    var wo = (window.orientation % 360 + 360) % 360;
+    if (wo === 0 || wo === 90 || wo === 180 || wo === 270) return wo;
+  }
+  return undefined;
+}
+
+// Contract D/G: {type:'caps', lenses, current, zoom_min, zoom_max, torch, width?, height?, fps?, rotation?}
 function sendCaps(){
   if (!(ctl && ctl.readyState === 'open')) return;
   var caps = (track && track.getCapabilities) ? track.getCapabilities() : {};
@@ -690,15 +725,22 @@ function sendCaps(){
     return { id: o.value, label: o.textContent };
   });
   var z = caps.zoom || {};
+  var msg = {
+    type: 'caps',
+    lenses: lenses,
+    current: st.deviceId || sel.value || '',
+    zoom_min: z.min !== undefined ? z.min : 1,
+    zoom_max: z.max !== undefined ? z.max : 1,
+    torch: !!caps.torch
+  };
+  if (typeof st.width === 'number') msg.width = st.width;
+  if (typeof st.height === 'number') msg.height = st.height;
+  var fpsVal = (typeof st.frameRate === 'number') ? st.frameRate : (typeof st.fps === 'number' ? st.fps : undefined);
+  if (typeof fpsVal === 'number' && !isNaN(fpsVal)) msg.fps = Math.round(fpsVal);
+  var rot = getRotation();
+  if (rot !== undefined) msg.rotation = rot;
   try {
-    ctl.send(JSON.stringify({
-      type: 'caps',
-      lenses: lenses,
-      current: st.deviceId || sel.value || '',
-      zoom_min: z.min !== undefined ? z.min : 1,
-      zoom_max: z.max !== undefined ? z.max : 1,
-      torch: !!caps.torch
-    }));
+    ctl.send(JSON.stringify(msg));
   } catch(e) { log('caps send ERR ' + e); }
 }
 
@@ -712,24 +754,38 @@ var PROFILES = {
 // Incoming ctl {type:'set', profile?, zoom?, torch?, lens?}
 // Lens/profile change re-acquires the track, which resets zoom/torch, so those apply after it.
 async function handleSet(m){
-  var needSwitch = false;
-  var resVal = PROFILES[m.profile];
-  if (resVal && $('res').value !== resVal) {
-    $('res').value = resVal;
-    needSwitch = true;
-  }
-  var sel = $('lens');
-  if (m.lens && m.lens !== sel.value && Array.prototype.some.call(sel.options, function(o){ return o.value === m.lens; })) {
-    hasUserSelectedLens = true;
-    sel.value = m.lens;
-    needSwitch = true;
-  }
-  if (needSwitch) await switchCam();
-  if (m.zoom !== undefined && m.zoom !== null) await applyZoom(+m.zoom);
-  if (m.torch !== undefined && m.torch !== null) {
-    torchOn = !!m.torch;
-    await applyC({ torch: torchOn });
-    updateTorchBtn();
+  try {
+    var needSwitch = false;
+    var resVal = PROFILES[m.profile];
+    if (resVal) {
+      if ($('res').value !== resVal) {
+        $('res').value = resVal;
+        needSwitch = true;
+      } else if (track && track.getSettings) {
+        var curSt = track.getSettings();
+        var targetR = parseRes();
+        var curMax = Math.max(curSt.width || 0, curSt.height || 0);
+        var targetMax = Math.max(targetR.w, targetR.h);
+        if (curMax !== targetMax) {
+          needSwitch = true;
+        }
+      }
+    }
+    var sel = $('lens');
+    if (m.lens && m.lens !== sel.value && Array.prototype.some.call(sel.options, function(o){ return o.value === m.lens; })) {
+      hasUserSelectedLens = true;
+      sel.value = m.lens;
+      needSwitch = true;
+    }
+    if (needSwitch) await switchCam();
+    if (m.zoom !== undefined && m.zoom !== null) await applyZoom(+m.zoom);
+    if (m.torch !== undefined && m.torch !== null) {
+      torchOn = !!m.torch;
+      await applyC({ torch: torchOn });
+      updateTorchBtn();
+    }
+  } finally {
+    sendCaps();
   }
 }
 
@@ -748,8 +804,13 @@ async function switchCam(){
     torchOn = false;
     updateTorchBtn();
     updateZoomUI(1);
+    var st = (track && track.getSettings) ? track.getSettings() : {};
+    log('switched: ' + JSON.stringify(st));
+    var req = parseRes();
+    if (st.width && st.height && (st.width < req.w || st.height < req.h)) {
+      log('real size ' + st.width + 'x' + st.height + ' lower than requested ' + req.w + 'x' + req.h + ' — keeping going');
+    }
     sendCaps();
-    log('switched: ' + JSON.stringify(track.getSettings()));
   } catch(e) {
     log('switch ERR ' + e);
   }
@@ -1045,6 +1106,15 @@ document.addEventListener('visibilitychange', async function(){
     }
   }
 });
+
+function onOrientationChange(){
+  sendCaps();
+  setTimeout(sendCaps, 250);
+}
+window.addEventListener('orientationchange', onOrientationChange);
+if (window.screen && window.screen.orientation && window.screen.orientation.addEventListener) {
+  window.screen.orientation.addEventListener('change', onOrientationChange);
+}
 
 // Details toggle (hidden by default)
 $('toggleDetails').onclick = function(){
