@@ -7,6 +7,7 @@ export type PauseReason = "call" | "background" | "locked" | "unknown";
 export type PathKind = "lan" | "usb";
 export type Profile = "economy" | "balanced" | "quality";
 export type DecoderKind = "auto" | "cuda" | "cpu";
+export type Rotation = 0 | 90 | 180 | 270;
 
 export interface Lens {
   id: string;
@@ -20,6 +21,7 @@ export interface Settings {
   torch: boolean;
   mirror: boolean;
   decoder: DecoderKind;
+  rotation: 0 | 90 | 180 | 270;
 }
 
 export type SettingsPatch = Partial<Settings>;
@@ -37,6 +39,12 @@ export interface AppState {
   fps: number;
   width: number;
   height: number;
+  srcWidth?: number | null;
+  srcHeight?: number | null;
+  srcFps?: number | null;
+  phoneWidth?: number | null;
+  phoneHeight?: number | null;
+  phoneFps?: number | null;
   lenses: Lens[];
   zoomMin: number;
   zoomMax: number;
@@ -46,6 +54,22 @@ export interface AppState {
 
 const hasTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+function normalizeState(s: AppState): AppState {
+  return {
+    ...s,
+    srcWidth: s.srcWidth ?? null,
+    srcHeight: s.srcHeight ?? null,
+    srcFps: s.srcFps ?? null,
+    phoneWidth: s.phoneWidth ?? null,
+    phoneHeight: s.phoneHeight ?? null,
+    phoneFps: s.phoneFps ?? null,
+    settings: {
+      ...s.settings,
+      rotation: (s.settings?.rotation ?? 0) as 0 | 90 | 180 | 270,
+    },
+  };
+}
 
 // ---- Mock backend for `npm run dev` outside Tauri. ----
 const QR_PLACEHOLDER =
@@ -70,6 +94,12 @@ let mockState: AppState = {
   fps: 0,
   width: 0,
   height: 0,
+  srcWidth: null,
+  srcHeight: null,
+  srcFps: null,
+  phoneWidth: null,
+  phoneHeight: null,
+  phoneFps: null,
   lenses: [
     { id: "back-wide", label: "Back Wide" },
     { id: "back-main", label: "Back Main" },
@@ -85,6 +115,7 @@ let mockState: AppState = {
     torch: false,
     mirror: false,
     decoder: "auto",
+    rotation: 0,
   },
 };
 
@@ -93,26 +124,30 @@ const mockEmit = () => mockListeners.forEach((cb) => cb(mockState));
 
 // ---- Public wrappers ----
 export function getState(): Promise<AppState> {
-  if (!hasTauri()) return Promise.resolve(mockState);
-  return invoke<AppState>("get_state");
+  if (!hasTauri()) return Promise.resolve(normalizeState(mockState));
+  return invoke<AppState>("get_state").then(normalizeState);
 }
 
 export function setSettings(patch: SettingsPatch): Promise<AppState> {
   if (!hasTauri()) {
-    mockState = { ...mockState, settings: { ...mockState.settings, ...patch } };
+    mockState = normalizeState({ ...mockState, settings: { ...mockState.settings, ...patch } });
     mockEmit();
     return Promise.resolve(mockState);
   }
-  return invoke<AppState>("set_settings", { patch });
+  return invoke<AppState>("set_settings", { patch }).then(normalizeState);
 }
 
 export function newPairing(): Promise<AppState> {
   if (!hasTauri()) {
-    mockState = { ...mockState, conn: "connecting", phoneUrl: `https://phonecam-eta.vercel.app/?room=${Math.random().toString(36).slice(2, 8)}` };
+    mockState = normalizeState({
+      ...mockState,
+      conn: "connecting",
+      phoneUrl: `https://phonecam-eta.vercel.app/?room=${Math.random().toString(36).slice(2, 8)}`,
+    });
     mockEmit();
     return Promise.resolve(mockState);
   }
-  return invoke<AppState>("new_pairing");
+  return invoke<AppState>("new_pairing").then(normalizeState);
 }
 
 /** Base64 JPEG (max width 640), or null when no frame is available. */
@@ -128,5 +163,5 @@ export function onState(cb: (s: AppState) => void): Promise<UnlistenFn> {
       mockListeners.delete(cb);
     });
   }
-  return listen<AppState>("state", (e) => cb(e.payload));
+  return listen<AppState>("state", (e) => cb(normalizeState(e.payload)));
 }

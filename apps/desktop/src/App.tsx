@@ -7,6 +7,7 @@ import {
   Pause,
   QrCode,
   RefreshCw,
+  RotateCw,
   Usb,
   Video,
   Wifi,
@@ -143,7 +144,7 @@ export default function App() {
   const showWaiting = state.conn === "live" && !frame;
 
   return (
-    <div className="flex h-full min-w-[900px] gap-3 px-3 py-2.5">
+    <div className="flex h-full min-w-[900px] gap-3 px-3 py-2">
       {/* Left: QR or live/paused preview */}
       <section className="flex min-w-0 flex-1 flex-col gap-2.5">
         <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-border bg-black">
@@ -204,7 +205,7 @@ export default function App() {
       </section>
 
       {/* Right: cards */}
-      <aside className="flex w-[290px] shrink-0 flex-col gap-2 overflow-y-auto">
+      <aside className="flex w-[290px] shrink-0 flex-col gap-1.5 overflow-y-auto">
         <ConnectionCard state={state} />
         <CameraCard state={state} />
         <DecoderCard state={state} />
@@ -256,12 +257,20 @@ function ConnectionCard({ state }: { state: AppState }) {
   );
 }
 
+const NEXT_ROTATION: Record<0 | 90 | 180 | 270, 0 | 90 | 180 | 270> = {
+  0: 90,
+  90: 180,
+  180: 270,
+  270: 0,
+};
+
 function CameraCard({ state }: { state: AppState }) {
   const { settings, lenses, zoomMin, zoomMax, torchAvailable } = state;
   const [zoomDraft, setZoomDraft] = useState<number | null>(null);
   const zoomValue = zoomDraft ?? settings.zoom;
 
   const patch = (p: SettingsPatch) => void setSettings(p);
+  const rotation = (settings.rotation ?? 0) as 0 | 90 | 180 | 270;
 
   return (
     <Card>
@@ -330,13 +339,36 @@ function CameraCard({ state }: { state: AppState }) {
           checked={settings.mirror}
           onChange={(mirror) => patch({ mirror })}
         />
+        <Button
+          variant="outline"
+          size="sm"
+          className="w-full"
+          onClick={() => patch({ rotation: NEXT_ROTATION[rotation] ?? 90 })}
+        >
+          <RotateCw aria-hidden />
+          Rotate · {rotation}°
+        </Button>
       </CardContent>
     </Card>
   );
 }
 
+function formatStreamStats(
+  w: number | null | undefined,
+  h: number | null | undefined,
+  fps: number | null | undefined,
+): string {
+  if (!w || !h || !fps || w <= 0 || h <= 0 || fps <= 0) return "—";
+  return `${w} × ${h} @ ${Math.round(fps)} fps`;
+}
+
+function formatResolution(w: number | null | undefined, h: number | null | undefined): string {
+  if (!w || !h || w <= 0 || h <= 0) return "—";
+  return `${w} × ${h}`;
+}
+
 function DecoderCard({ state }: { state: AppState }) {
-  const { settings, decoderName, fps, width, height } = state;
+  const { settings, decoderName, width, height, srcWidth, srcHeight, srcFps, phoneWidth, phoneHeight, phoneFps } = state;
   return (
     <Card>
       <CardHeader>
@@ -363,8 +395,9 @@ function DecoderCard({ state }: { state: AppState }) {
             {decoderName ?? "—"}
           </span>
         </Row>
-        <Row label="Frame rate">{fps > 0 ? `${fps} fps` : "—"}</Row>
-        <Row label="Resolution">{width > 0 && height > 0 ? `${width} × ${height}` : "—"}</Row>
+        <Row label="Phone sends">{formatStreamStats(phoneWidth, phoneHeight, phoneFps)}</Row>
+        <Row label="Received">{formatStreamStats(srcWidth, srcHeight, srcFps)}</Row>
+        <Row label="Camera output">{formatResolution(width, height)}</Row>
       </CardContent>
     </Card>
   );
@@ -373,7 +406,7 @@ function DecoderCard({ state }: { state: AppState }) {
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-[12px] font-medium text-muted-foreground">{label}</span>
+      <span className="text-[12px] font-medium leading-none text-muted-foreground">{label}</span>
       {children}
     </div>
   );
@@ -381,7 +414,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex min-h-[28px] items-center justify-between gap-3 text-[13px]">
+    <div className="flex min-h-[22px] items-center justify-between gap-3 text-[13px]">
       <span className="text-muted-foreground">{label}</span>
       <span className="text-right">{children}</span>
     </div>
