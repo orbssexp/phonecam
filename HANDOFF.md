@@ -108,3 +108,20 @@ balance, focus lock, zoom, flash, flip).
 Direction proposed to the user (awaiting answer): bring phase 2 (native Swift sender) forward.
 UI reference from the user: near-black background, thin 1px borders, square corners, small
 bracketed mono labels ("[ JOIN SESSION ]"), large light heading, preview left + settings card right.
+
+## Update 2026-11-10 (Round H merged: native iPhone sender)
+
+Done and merged into `main`: H1 desktop native receiver (`phonecam_transport::native`, mDNS
+`_phonecam._tcp`, TCP, HMAC handshake; native source preferred over WebRTC), H2 iOS app (`apps/ios`,
+XcodeGen, CI `.github/workflows/ios.yml` builds an unsigned `PhoneCam.ipa` artifact), H3 UI restyle,
+plus the `smooth` (1080p60) profile. 101 tests pass; installer rebuilt.
+
+NOT verified: the iOS app has only been compiled (never run on a device); real mDNS discovery on
+the LAN; the restyled UI was never seen on screen (fit at 1000x720 is estimated); fake-phone e2e
+skipped (installed app was running). Clippy on the merged tree was reported clean per branch only.
+
+Next: user sideloads the ipa (Sideloadly, free Apple ID, 7-day re-sign), installs the new desktop
+build, pairs by scanning the desktop QR in the app. Then debug from `phonecam.log` (`[native]`
+lines). Known: desktop handshake timeout 5 s (phone 10 s); while native owns the session WebRTC
+events are dropped. agy was blocked by the auto-mode classifier (skip-permissions flag) this round.
+Round I list is in the contracts doc.
