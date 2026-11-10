@@ -245,7 +245,7 @@ function ConnectionCard({ state }: { state: AppState }) {
           {state.battery != null ? (
             <span className="flex items-center gap-1.5">
               {state.charging ? <BatteryCharging className="size-4" aria-hidden /> : <Battery className="size-4" aria-hidden />}
-              {state.charging ? `${state.battery}% charging` : `${state.battery}%`}
+              {(() => { const pct = Math.round(state.battery <= 1 ? state.battery * 100 : state.battery); return state.charging ? `${pct}% charging` : `${pct}%`; })()}
             </span>
           ) : (
             "—"
