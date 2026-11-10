@@ -13,14 +13,14 @@ export const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-7 min-h-[28px] w-full items-center justify-between gap-2 rounded-md border border-border bg-muted px-2.5 text-[13px] text-foreground disabled:opacity-50 [&>span]:truncate",
+      "flex h-8 min-h-[28px] w-full items-center justify-between gap-2 rounded-none border border-border bg-transparent px-2.5 text-[13px] text-foreground hover:bg-white/5 disabled:opacity-40 [&>span]:truncate",
       className,
     )}
     {...props}
   >
     {children}
     <SelectPrimitive.Icon asChild>
-      <ChevronDown className="size-4 opacity-70" />
+      <ChevronDown className="size-3.5 opacity-60" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
 ));
@@ -35,7 +35,7 @@ export const SelectContent = React.forwardRef<
       ref={ref}
       position={position}
       className={cn(
-        "z-50 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-md border border-border bg-card text-card-foreground shadow-lg",
+        "z-50 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-none border border-border bg-card text-card-foreground",
         className,
       )}
       {...props}
@@ -53,7 +53,7 @@ export const SelectItem = React.forwardRef<
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex min-h-[28px] w-full cursor-default select-none items-center rounded-sm py-1 pr-7 pl-2 text-[13px] outline-none focus:bg-accent data-[disabled]:opacity-50",
+      "relative flex min-h-[28px] w-full cursor-default select-none items-center rounded-none py-1 pr-7 pl-2 text-[13px] outline-none focus:bg-white/10 data-[disabled]:opacity-40",
       className,
     )}
     {...props}
