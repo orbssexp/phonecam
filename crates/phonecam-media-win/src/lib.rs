@@ -9,6 +9,7 @@ pub mod preview;
 pub mod rotate;
 
 use std::ffi::{c_char, c_void, CStr};
+use std::collections::VecDeque;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -461,7 +462,53 @@ impl Media {
     }
 }
 
-const DEC_BUF_BYTES: usize = 3840 * 2160 * 3;
+/// Access units waiting for the decoder beyond which the backlog is dropped (about 100 ms of 30 fps).
+const MAX_BACKLOG: usize = 3;
+
+/// Per-window (10 s) pipeline measurements for the `[media]` line.
+#[derive(Default)]
+struct StageWindow {
+    frames: u64,
+    queue_ms: f64,
+    queue_max_ms: f64,
+    decode_ms: f64,
+    download_ms: f64,
+    convert_ms: f64,
+    rotate_ms: f64,
+    scale_ms: f64,
+    total_ms: f64,
+    skipped: u64,
+}
+
+/// Drops the access units that would only play old video. With a keyframe in the queue everything
+/// before the newest one goes (decoding resumes there); with none, every access unit goes and
+/// `await_key` is set so deltas are skipped until a keyframe arrives. Other messages are kept in
+/// order. Returns how many access units were dropped.
+fn trim_backlog(q: &mut VecDeque<MediaMsg>, await_key: &mut bool) -> usize {
+    let last_key = q.iter().rposition(|m| matches!(m, MediaMsg::Au(a) if a.keyframe));
+    let mut dropped = 0;
+    let kept: VecDeque<MediaMsg> = q
+        .drain(..)
+        .enumerate()
+        .filter(|(i, m)| {
+            let stale = matches!(m, MediaMsg::Au(_)) && last_key.is_none_or(|k| *i < k);
+            if stale {
+                dropped += 1;
+            }
+            !stale
+        })
+        .map(|(_, m)| m)
+        .collect();
+    *q = kept;
+    if last_key.is_none() {
+        if dropped > 0 {
+            *await_key = true;
+        }
+    } else {
+        *await_key = false;
+    }
+    dropped
+}
 /// No access unit for this long: drop the decoder (and its GPU surfaces / driver state).
 const DEC_IDLE_TEARDOWN: Duration = Duration::from_secs(3);
 
@@ -517,6 +564,15 @@ fn run_media_loop(
     let mut decoder_pref = decoder_pref;
     let cam = SoftcamCamera::new(out_w, out_h);
 
+    // Decoded frames are downscaled inside the decoder's colour conversion to fit this square box
+    // (aspect kept, never upscaled), so no 4K BGR frame ever exists. A square box is enough for
+    // both landscape and portrait streams, before or after the 90 degree rotation.
+    let fit = out_w.max(out_h) as i32;
+    let dec_buf_bytes = fit as usize * fit as usize * 3;
+    let mut pending: VecDeque<MediaMsg> = VecDeque::new();
+    let mut await_key = false;
+    let mut win = StageWindow::default();
+
     let mut out_buf = vec![0u8; (out_w * out_h * 3) as usize];
     // Allocated only while a decoder is open (a 4K BGR buffer is 25 MB of commit).
     let mut dec_buf: Vec<u8> = Vec::new();
@@ -554,11 +610,25 @@ fn run_media_loop(
             tick_interval - elapsed
         };
 
-        let msg = match rx.recv_timeout(timeout) {
-            Ok(m) => Some(m),
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        };
+        if pending.is_empty() {
+            match rx.recv_timeout(timeout) {
+                Ok(m) => pending.push_back(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        while let Ok(m) = rx.try_recv() {
+            pending.push_back(m);
+        }
+        // The decoder fell behind: keep only the newest picture instead of playing old video late.
+        if pending.iter().filter(|m| matches!(m, MediaMsg::Au(_))).count() > MAX_BACKLOG {
+            let dropped = trim_backlog(&mut pending, &mut await_key);
+            win.skipped += dropped as u64;
+            if await_key {
+                need_keyframe.store(true, Ordering::Relaxed);
+            }
+        }
+        let msg = pending.pop_front();
 
         match msg {
             Some(MediaMsg::Shutdown) => break,
@@ -575,6 +645,7 @@ fn run_media_loop(
                     scaler = None;
                     decode_errors = 0;
                     total_frames_decoded = 0;
+                    await_key = false;
                 }
             }
             Some(MediaMsg::SetFrame(new_frame)) => {
@@ -595,6 +666,16 @@ fn run_media_loop(
             }
             Some(MediaMsg::Au(au)) => {
                 last_au_at = Instant::now();
+                let au_start = Instant::now();
+                let queue_ms = au_start.saturating_duration_since(au.at).as_secs_f64() * 1000.0;
+                if await_key {
+                    if !au.keyframe {
+                        need_keyframe.store(true, Ordering::Relaxed);
+                        win.skipped += 1;
+                        continue;
+                    }
+                    await_key = false;
+                }
                 // The decoder is torn down when the stream stops; reopen only on a keyframe so the
                 // hardware-fallback logic never mistakes missing reference frames for a broken decoder.
                 if dec.is_none() && !au.keyframe {
@@ -631,7 +712,7 @@ fn run_media_loop(
                     let rot = rotation.total();
                     let direct = direct_ok && current_vcam_frame == VcamFrame::Camera && rot == 0;
                     if !direct && dec_buf.is_empty() {
-                        dec_buf = vec![0u8; DEC_BUF_BYTES];
+                        dec_buf = vec![0u8; dec_buf_bytes];
                     }
                     let (dst_ptr, dst_len) = if direct {
                         (out_buf.as_mut_ptr(), out_buf.len())
@@ -639,6 +720,7 @@ fn run_media_loop(
                         (dec_buf.as_mut_ptr(), dec_buf.len())
                     };
 
+                    let mut t_dec = [0f64; 3];
                     let n = unsafe {
                         ffi::dec_decode(
                             d.0,
@@ -646,6 +728,9 @@ fn run_media_loop(
                             au.data.len() as i32,
                             dst_ptr,
                             dst_len as i32,
+                            fit,
+                            fit,
+                            t_dec.as_mut_ptr(),
                             &mut w,
                             &mut h,
                             &mut hw,
@@ -678,6 +763,12 @@ fn run_media_loop(
                         }
                     } else if n > 0 && w > 0 && h > 0 {
                         decode_errors = 0;
+                        win.decode_ms += t_dec[0];
+                        win.download_ms += t_dec[1];
+                        win.convert_ms += t_dec[2];
+                        win.queue_ms += queue_ms;
+                        win.queue_max_ms = win.queue_max_ms.max(queue_ms);
+                        win.frames += 1;
                         total_frames_decoded += n as u64;
                         frames_window += n as u64;
 
@@ -697,7 +788,7 @@ fn run_media_loop(
                             // Resolution changed under us: the frame landed in out_buf's prefix.
                             direct_ok = false;
                             let bytes = (w as usize * h as usize * 3).min(out_buf.len());
-                            dec_buf = vec![0u8; DEC_BUF_BYTES];
+                            dec_buf = vec![0u8; dec_buf_bytes];
                             dec_buf[..bytes].copy_from_slice(&out_buf[..bytes]);
                         }
                         if direct && (w as u32, h as u32) == (out_w, out_h) {
@@ -707,9 +798,11 @@ fn run_media_loop(
                             cam.send_frame(&out_buf);
                             update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
                             last_tick = Instant::now();
+                            win.total_ms += au_start.elapsed().as_secs_f64() * 1000.0;
                         } else if current_vcam_frame == VcamFrame::Camera {
                             // Rotate (auto + manual) before letterboxing.
                             let need = w as usize * h as usize * 3;
+                            let t_rot = Instant::now();
                             let (sw, sh) = if rot == 0 {
                                 rot_buf = Vec::new();
                                 (w as u32, h as u32)
@@ -726,6 +819,8 @@ fn run_media_loop(
                                 )
                             };
                             let src: &[u8] = if rot == 0 { &dec_buf } else { &rot_buf };
+                            win.rotate_ms += t_rot.elapsed().as_secs_f64() * 1000.0;
+                            let t_scale = Instant::now();
 
                             let rect = calculate_letterbox(sw, sh, out_w, out_h);
 
@@ -759,12 +854,14 @@ fn run_media_loop(
                                 s.scale(src.as_ptr(), (sw * 3) as i32, dst_ptr, dst_stride, sh as i32);
                             }
 
+                            win.scale_ms += t_scale.elapsed().as_secs_f64() * 1000.0;
                             if mirror.load(Ordering::Relaxed) {
                                 letterbox::mirror_bgr_in_place(&mut out_buf, out_w, out_h);
                             }
                             cam.send_frame(&out_buf);
                             update_latest_frame(&latest_frame, &preview, out_w, out_h, &out_buf);
                             last_tick = Instant::now();
+                            win.total_ms += au_start.elapsed().as_secs_f64() * 1000.0;
                             if rot == 0 && (w as u32, h as u32) == (out_w, out_h) {
                                 direct_ok = true;
                                 dec_buf = Vec::new();
@@ -786,6 +883,7 @@ fn run_media_loop(
                     decode_errors = 0;
                     total_frames_decoded = 0;
                     unsafe { ffi::dec_trim_memory() };
+                    await_key = false;
                 }
                 if current_vcam_frame != VcamFrame::Camera || total_frames_decoded == 0 {
                     placeholder::render_placeholder(current_vcam_frame, out_w, out_h, &mut out_buf);
@@ -810,6 +908,22 @@ fn run_media_loop(
                     dec.as_ref().map(|d| d.name()).unwrap_or_else(|| "closed".into()),
                 );
             }
+            if win.frames > 0 || win.skipped > 0 {
+                let n = win.frames.max(1) as f64;
+                tracing::info!(
+                    "[media] stages avg ms/frame: queue {:.1} (max {:.1}), decode {:.1}, download {:.1}, convert+downscale {:.1}, rotate {:.1}, letterbox {:.1}, total {:.1}; {} AUs skipped (backlog > {MAX_BACKLOG})",
+                    win.queue_ms / n,
+                    win.queue_max_ms,
+                    win.decode_ms / n,
+                    win.download_ms / n,
+                    win.convert_ms / n,
+                    win.rotate_ms / n,
+                    win.scale_ms / n,
+                    win.total_ms / n,
+                    win.skipped,
+                );
+            }
+            win = StageWindow::default();
             frames_window = 0;
             last_log = Instant::now();
         }
@@ -819,6 +933,30 @@ fn run_media_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn au(keyframe: bool) -> MediaMsg {
+        MediaMsg::Au(Au { data: Arc::from(&[0u8][..]), keyframe, at: Instant::now() })
+    }
+
+    #[test]
+    fn backlog_trim_keeps_from_newest_keyframe() {
+        let mut q: VecDeque<MediaMsg> = [au(true), au(false), au(true), au(false), au(false)].into();
+        let mut await_key = true;
+        assert_eq!(trim_backlog(&mut q, &mut await_key), 2);
+        assert_eq!(q.len(), 3);
+        assert!(matches!(&q[0], MediaMsg::Au(a) if a.keyframe));
+        assert!(!await_key);
+    }
+
+    #[test]
+    fn backlog_trim_without_keyframe_drops_all_and_waits() {
+        let mut q: VecDeque<MediaMsg> = [au(false), MediaMsg::SetFrame(VcamFrame::Camera), au(false), au(false)].into();
+        let mut await_key = false;
+        assert_eq!(trim_backlog(&mut q, &mut await_key), 3);
+        assert_eq!(q.len(), 1);
+        assert!(matches!(q[0], MediaMsg::SetFrame(_)));
+        assert!(await_key);
+    }
 
     #[test]
     fn test_decoder_pref_display_and_parse() {
