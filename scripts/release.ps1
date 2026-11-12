@@ -55,16 +55,13 @@ try {
     if (-not $repo) { Fail "could not resolve the GitHub repo (gh logged in?)" }
 
     if (-not $DryRun) {
-        git ls-remote --exit-code --tags origin "refs/tags/$tag" *> $null
-        if ($LASTEXITCODE -eq 0) { Fail "tag $tag already exists on origin" }
-        $global:LASTEXITCODE = 0
+        if (git ls-remote --tags origin "refs/tags/$tag") { Fail "tag $tag already exists on origin" }
         git fetch -q origin
         if (-not (git branch -r --contains HEAD)) { Fail "HEAD is not pushed to origin; push first" }
     }
 
     if (-not $Notes) {
-        $prev = git describe --tags --abbrev=0 2>$null
-        $global:LASTEXITCODE = 0
+        $prev = git tag --list "v*" --sort=-v:refname | Select-Object -First 1
         $range = if ($prev) { "$prev..HEAD" } else { "HEAD" }
         $Notes = (git log --no-merges --pretty="- %s" $range) -join "`n"
         if (-not $Notes) { $Notes = "PhoneCam $tag" }
