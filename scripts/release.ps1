@@ -122,7 +122,7 @@ try {
     $notesFile = Join-Path $out "notes.txt"
     [IO.File]::WriteAllText($notesFile, $Notes, (New-Object Text.UTF8Encoding($false)))
     Run "gh release create" { gh release create $tag @assets --repo $repo --title "PhoneCam $tag" --notes-file $notesFile --target (git rev-parse HEAD) }
-    Write-Host "Released $tag: https://github.com/$repo/releases/tag/$tag" -ForegroundColor Green
+    Write-Host "Released ${tag}: https://github.com/$repo/releases/tag/$tag" -ForegroundColor Green
 } finally {
     Pop-Location
 }
