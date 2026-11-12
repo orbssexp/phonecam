@@ -5,9 +5,8 @@
 //! handshake and then turns frames into the same [`TransportEvent`]s the WebRTC engine emits, so
 //! the media pipeline and the UI do not care which source is live. One worker thread owns the
 //! connection state; one short-lived reader thread per connection parses frames.
-use crate::{SharedStats, Stats, TransportEvent};
+use crate::{Done, SharedStats, Stats, TransportEvent};
 use mdns_sd::{RecvTimeoutError as MdnsTimeout, ServiceDaemon, ServiceEvent};
-use phonecam_core::backoff::Backoff;
 use phonecam_core::heartbeat::{HbAction, Heartbeat};
 use phonecam_core::native_auth as auth;
 use phonecam_core::path::PathKind;
@@ -18,7 +17,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc as tmpsc;
 
@@ -28,7 +27,15 @@ pub const MAX_FRAME: usize = 8 * 1024 * 1024;
 pub const T_CONTROL: u8 = 0x01;
 pub const T_VIDEO: u8 = 0x03;
 const RECV_BUF: usize = 4 * 1024 * 1024;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
+/// After auth, ask for a keyframe when none arrived within this long, and again every this long.
+const KEY_RETRY: Duration = Duration::from_millis(1500);
+/// Window over which the received bitrate and the lag estimate are refreshed.
+const STATS_EVERY: Duration = Duration::from_secs(1);
+const LOG_EVERY: Duration = Duration::from_secs(10);
+/// Capacity of the events channel to the app: small, so a slow consumer shows up as drops (and a
+/// keyframe resync) right away instead of as seconds of queued video.
+const EVENT_QUEUE: usize = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCOVER_FOR: Duration = Duration::from_secs(4);
 const HB_INTERVAL_MS: u64 = 2_000;
@@ -154,8 +161,8 @@ enum Cmd {
 
 enum Msg {
     Cmd(Cmd),
-    /// `(session id, frame)` from a reader thread; stale ids are ignored.
-    Frame(u64, Frame),
+    /// `(session id, frame, arrival time)` from a reader thread; stale ids are ignored.
+    Frame(u64, Frame, Instant),
     Closed(u64, String),
 }
 
@@ -163,6 +170,7 @@ enum Msg {
 pub struct NativeHandle {
     tx: mpsc::Sender<Msg>,
     stats: Arc<SharedStats>,
+    done: Arc<Done>,
 }
 
 impl NativeHandle {
@@ -177,9 +185,13 @@ impl NativeHandle {
     pub fn stats(&self) -> Stats {
         self.stats.snapshot()
     }
-    /// Stop the worker. Idempotent; events end after this.
+    /// Stop the worker and wait (at most [`crate::SHUTDOWN_WAIT`]) for it to exit. Idempotent;
+    /// events end after this. Blocks: call it outside locks and off the async executor.
     pub fn shutdown(&self) {
         let _ = self.tx.send(Msg::Cmd(Cmd::Shutdown));
+        if !self.done.wait(crate::SHUTDOWN_WAIT) {
+            tracing::warn!("[native] worker did not stop within {} s", crate::SHUTDOWN_WAIT.as_secs());
+        }
     }
 }
 
@@ -197,18 +209,142 @@ impl NativeReceiver {
     }
 
     pub fn start_with(cfg: NativeConfig) -> (NativeHandle, tmpsc::Receiver<TransportEvent>) {
-        let (ev_tx, ev_rx) = tmpsc::channel(256);
+        let (ev_tx, ev_rx) = tmpsc::channel(EVENT_QUEUE);
         let (tx, rx) = mpsc::channel();
         let stats = Arc::new(SharedStats::default());
+        let done = Arc::new(Done::default());
         let mut worker = Worker::new(cfg, tx.clone(), rx, ev_tx, stats.clone());
+        let done2 = done.clone();
         std::thread::Builder::new()
             .name("phonecam-native".into())
             .spawn(move || {
                 worker.run();
                 tracing::info!("[native] worker stopped");
+                done2.set();
             })
             .expect("spawn native thread");
-        (NativeHandle { tx, stats }, ev_rx)
+        (NativeHandle { tx, stats, done }, ev_rx)
+    }
+}
+
+// ---------- throughput and lag measurement ----------
+
+// ---------- throughput and lag measurement ----------
+
+/// End-to-end lag estimate: how much later AUs arrive, relative to the phone's capture clock
+/// (`pts`), than the best case seen in the last 30 s. A growing value means frames are queuing
+/// somewhere between the phone's encoder and our socket (the phone's send queue, the network).
+struct LagEstimator {
+    first_pts_ms: Option<f64>,
+    last_pts_ms: f64,
+    /// `(second index, smallest arrival-minus-pts in that second)`, last 30 s.
+    mins: std::collections::VecDeque<(u64, f64)>,
+    sum: f64,
+    n: u64,
+}
+
+impl LagEstimator {
+    fn new() -> Self {
+        Self { first_pts_ms: None, last_pts_ms: 0.0, mins: Default::default(), sum: 0.0, n: 0 }
+    }
+
+    fn observe(&mut self, arrival_ms: f64, pts_ms: f64) {
+        // The phone restarted its capture clock: start over.
+        if self.first_pts_ms.is_some() && pts_ms + 1000.0 < self.last_pts_ms {
+            *self = Self::new();
+        }
+        let first = *self.first_pts_ms.get_or_insert(pts_ms);
+        self.last_pts_ms = pts_ms;
+        let d = arrival_ms - (pts_ms - first);
+        let sec = (arrival_ms / 1000.0) as u64;
+        match self.mins.back_mut() {
+            Some((s, m)) if *s == sec => *m = m.min(d),
+            _ => self.mins.push_back((sec, d)),
+        }
+        while self.mins.front().is_some_and(|(s, _)| *s + 30 < sec) {
+            self.mins.pop_front();
+        }
+        self.sum += d;
+        self.n += 1;
+    }
+
+    /// Lag averaged over the AUs seen since the last call, in ms; `None` when there were none.
+    fn take(&mut self) -> Option<u32> {
+        if self.n == 0 {
+            return None;
+        }
+        let avg = self.sum / self.n as f64;
+        let base = self.mins.iter().map(|(_, m)| *m).fold(f64::INFINITY, f64::min);
+        self.sum = 0.0;
+        self.n = 0;
+        Some((avg - base).max(0.0).round() as u32)
+    }
+}
+
+/// Per-connection counters behind the `[native]` stats line and the UI's bitrate / delay.
+struct Flow {
+    lag: LagEstimator,
+    win_start: Instant,
+    bytes: u64,
+    log_start: Instant,
+    bytes10: u64,
+    aus10: u64,
+    keys10: u64,
+    lag_max10: u32,
+    lag_last: u32,
+}
+
+impl Flow {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self { lag: LagEstimator::new(), win_start: now, bytes: 0, log_start: now, bytes10: 0, aus10: 0, keys10: 0, lag_max10: 0, lag_last: 0 }
+    }
+
+    fn on_au(&mut self, len: usize, keyframe: bool, arrival: Duration, pts_us: u64) {
+        self.bytes += len as u64;
+        self.bytes10 += len as u64;
+        self.aus10 += 1;
+        self.keys10 += u64::from(keyframe);
+        self.lag.observe(arrival.as_secs_f64() * 1000.0, pts_us as f64 / 1000.0);
+    }
+}
+
+/// Addresses to try, IPv4 first (then global / ULA IPv6; link-local needs a scope id we lack).
+fn order_addrs(ips: impl Iterator<Item = IpAddr>, port: u16) -> Vec<SocketAddr> {
+    let (mut v4, mut v6) = (vec![], vec![]);
+    for ip in ips {
+        match ip {
+            IpAddr::V4(a) => v4.push(SocketAddr::new(IpAddr::V4(a), port)),
+            IpAddr::V6(a) if (a.segments()[0] & 0xffc0) != 0xfe80 => v6.push(SocketAddr::new(IpAddr::V6(a), port)),
+            IpAddr::V6(_) => {}
+        }
+    }
+    v4.sort();
+    v4.dedup();
+    v6.sort();
+    v6.dedup();
+    v4.extend(v6);
+    v4
+}
+
+/// Delay before the next try while the service is visible: 0.5 s, 1 s, then 2 s.
+fn retry_delay_ms(failures: u32) -> u64 {
+    match failures {
+        0 | 1 => 500,
+        2 => 1_000,
+        _ => 2_000,
+    }
+}
+
+/// Plain-words reason for a failed TCP connect.
+fn describe_connect_error(e: &io::Error) -> String {
+    use io::ErrorKind as K;
+    match e.kind() {
+        K::TimedOut | K::WouldBlock => format!("connect timeout after {} ms", CONNECT_TIMEOUT.as_millis()),
+        K::ConnectionRefused => "refused (nothing listening on that port)".into(),
+        K::ConnectionReset | K::ConnectionAborted => "connection reset during connect".into(),
+        K::HostUnreachable | K::NetworkUnreachable => "no route to host".into(),
+        _ => format!("{e}"),
     }
 }
 
@@ -236,6 +372,9 @@ struct Session {
     paused_since: Option<Instant>,
     last_rtt: u32,
     started: Instant,
+    flow: Flow,
+    /// When a keyframe was last requested (or the session began): drives the 1.5 s re-request.
+    key_asked: Instant,
 }
 
 impl Worker {
@@ -251,27 +390,70 @@ impl Worker {
 
     fn run(&mut self) {
         tracing::info!("[native] started ({})", if self.cfg.addr.is_some() { "explicit address" } else { "mDNS browse" });
-        let mut backoff = Backoff::new(1_000, 30_000);
+        let mut failures = 0u32;
         while !self.done {
             let addrs = match self.cfg.addr {
                 Some(a) => vec![a],
                 None => self.discover(),
             };
+            let mut visible = false;
             if !self.done && !addrs.is_empty() {
+                visible = true;
                 match self.connect(&addrs) {
                     Some(s) => {
-                        backoff.reset();
+                        failures = 0;
                         self.session(s);
+                        // The phone just dropped us (or the app is quitting): look again right away.
+                        continue;
                     }
-                    None => tracing::warn!("[native] could not connect/authenticate"),
+                    None => failures += 1,
                 }
             }
             if !self.done {
-                self.wait(Duration::from_millis(backoff.next_delay_ms()));
+                // Service visible: retry quickly. Not visible: the browse above already waited.
+                let d = if visible { retry_delay_ms(failures) } else { 250 };
+                self.wait(Duration::from_millis(d));
             }
         }
         if let Some(d) = self.daemon.take() {
             let _ = d.shutdown();
+        }
+    }
+
+    /// Once a second: refresh the received bitrate and lag the UI reads; every 10 s: one log line.
+    fn flow_tick(&mut self, s: &mut Session) {
+        let f = &mut s.flow;
+        let el = f.win_start.elapsed();
+        if el >= STATS_EVERY {
+            let kbps = (f.bytes as f64 * 8.0 / 1000.0 / el.as_secs_f64()).round() as u32;
+            self.stats.rx_kbps.store(kbps, Ordering::Relaxed);
+            if let Some(lag) = f.lag.take() {
+                f.lag_last = lag;
+                f.lag_max10 = f.lag_max10.max(lag);
+            }
+            self.stats.lag_ms.store(f.lag_last, Ordering::Relaxed);
+            f.bytes = 0;
+            f.win_start = Instant::now();
+        }
+        let el = f.log_start.elapsed();
+        if el >= LOG_EVERY {
+            let secs = el.as_secs_f64();
+            tracing::info!(
+                "[native] stats last {:.0}s: received {:.0} kbps, {} AUs ({:.1}/s), average AU {} bytes, {} keyframes, lag {} ms (max {} ms)",
+                secs,
+                f.bytes10 as f64 * 8.0 / 1000.0 / secs,
+                f.aus10,
+                f.aus10 as f64 / secs,
+                f.bytes10.checked_div(f.aus10).unwrap_or(0),
+                f.keys10,
+                f.lag_last,
+                f.lag_max10,
+            );
+            f.bytes10 = 0;
+            f.aus10 = 0;
+            f.keys10 = 0;
+            f.lag_max10 = f.lag_last;
+            f.log_start = Instant::now();
         }
     }
 
@@ -327,11 +509,7 @@ impl Worker {
             }
             match browse.recv_timeout(Duration::from_millis(250)) {
                 Ok(ServiceEvent::ServiceResolved(info)) if info.get_property_val_str("id") == Some(want.as_str()) => {
-                    for ip in info.addresses.iter().map(|a| a.to_ip_addr()) {
-                        if let IpAddr::V4(v4) = ip {
-                            found.push(SocketAddr::new(IpAddr::V4(v4), info.port));
-                        }
-                    }
+                    found = order_addrs(info.addresses.iter().map(|a| a.to_ip_addr()), info.port);
                     tracing::info!(
                         "[native] found paired phone '{}' ({} address(es))",
                         info.get_property_val_str("name").unwrap_or("?"),
@@ -346,21 +524,62 @@ impl Worker {
         found
     }
 
+    /// Tries every address in order (IPv4 first); logs exactly why each one failed. The attempt
+    /// runs on its own thread so a shutdown does not wait for a dead address.
     fn connect(&mut self, addrs: &[SocketAddr]) -> Option<TcpStream> {
         for a in addrs {
-            match open_stream(a) {
-                Ok(mut s) => {
-                    let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
-                    let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
-                    match client_handshake(&mut s, &self.cfg.secret) {
-                        Ok(()) => {
-                            tracing::info!("[native] authenticated with {a}");
-                            return Some(s);
+            if self.done {
+                return None;
+            }
+            let t0 = Instant::now();
+            let secret = self.cfg.secret.clone();
+            let addr = *a;
+            let slot: Arc<Mutex<Option<TcpStream>>> = Arc::default();
+            let slot2 = slot.clone();
+            let (rtx, rrx) = mpsc::channel::<Result<TcpStream, String>>();
+            let spawned = std::thread::Builder::new().name("phonecam-native-conn".into()).spawn(move || {
+                let r = match open_stream(&addr) {
+                    Ok(mut s) => {
+                        if let Ok(c) = s.try_clone() {
+                            *slot2.lock().unwrap_or_else(|e| e.into_inner()) = Some(c);
                         }
-                        Err(e) => tracing::warn!("[native] handshake with {a} failed: {e}"),
+                        let _ = s.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+                        let _ = s.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
+                        match client_handshake(&mut s, &secret) {
+                            Ok(()) => Ok(s),
+                            Err(e) => Err(format!("handshake with {addr} failed: {e}")),
+                        }
                     }
+                    Err(e) => Err(format!("connect to {addr} failed: {}", describe_connect_error(&e))),
+                };
+                let _ = rtx.send(r);
+            });
+            if spawned.is_err() {
+                continue;
+            }
+            let res = loop {
+                match rrx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(r) => break Some(r),
+                    Err(RecvTimeoutError::Timeout) => {
+                        self.drain_cmds();
+                        if self.done {
+                            // Cancel: closing the socket makes the handshake read fail at once.
+                            if let Some(c) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                                let _ = c.shutdown(std::net::Shutdown::Both);
+                            }
+                            break None;
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break None,
                 }
-                Err(e) => tracing::debug!("[native] connect {a}: {e}"),
+            };
+            match res {
+                Some(Ok(s)) => {
+                    tracing::info!("[native] authenticated with {a} (connect+handshake {} ms)", t0.elapsed().as_millis());
+                    return Some(s);
+                }
+                Some(Err(e)) => tracing::warn!("[native] {e}"),
+                None => return None,
             }
         }
         None
@@ -394,6 +613,8 @@ impl Worker {
             paused_since: None,
             last_rtt: 0,
             started: Instant::now(),
+            flow: Flow::new(),
+            key_asked: Instant::now(),
         };
         self.emit(TransportEvent::PhoneJoined);
         self.conn_event(ConnEvent::PhoneJoined);
@@ -404,9 +625,9 @@ impl Worker {
                 break "shutdown".to_string();
             }
             match self.rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(Msg::Frame(id, f)) if id == s.sid => {
+                Ok(Msg::Frame(id, f, at)) if id == s.sid => {
                     s.hb.alive();
-                    if let Err(e) = self.on_frame(&mut s, f) {
+                    if let Err(e) = self.on_frame(&mut s, f, at) {
                         break e;
                     }
                 }
@@ -418,6 +639,7 @@ impl Worker {
                     }
                 }
                 Ok(Msg::Cmd(Cmd::Keyframe)) => {
+                    s.key_asked = Instant::now();
                     if let Err(e) = send_json(&mut s.stream, KEYFRAME_REQ) {
                         break format!("send: {e}");
                     }
@@ -429,6 +651,8 @@ impl Worker {
             }
         };
         let _ = s.stream.shutdown(std::net::Shutdown::Both);
+        self.stats.rx_kbps.store(0, Ordering::Relaxed);
+        self.stats.lag_ms.store(0, Ordering::Relaxed);
         tracing::info!("[native] disconnected after {}s: {reason}", s.started.elapsed().as_secs());
         self.emit(TransportEvent::PhoneLeft);
         self.conn_event(ConnEvent::PhoneLeft);
@@ -436,6 +660,14 @@ impl Worker {
 
     /// Heartbeat: ping every interval, give up after the miss limit (not while the phone is paused).
     fn tick(&mut self, s: &mut Session) -> Result<(), String> {
+        self.flow_tick(s);
+        // No keyframe yet (or lost sync): ask again every KEY_RETRY until one arrives.
+        if s.need_key && s.key_asked.elapsed() >= KEY_RETRY {
+            s.key_asked = Instant::now();
+            self.stats.plis.fetch_add(1, Ordering::Relaxed);
+            tracing::info!("[native] no keyframe yet, requesting one");
+            send_json(&mut s.stream, KEYFRAME_REQ).map_err(|e| format!("send keyframe request: {e}"))?;
+        }
         let ms = s.started.elapsed().as_millis() as u64;
         if s.paused_since.is_some_and(|t| t.elapsed() < PAUSE_GRACE) {
             s.hb.alive();
@@ -449,7 +681,7 @@ impl Worker {
         }
     }
 
-    fn on_frame(&mut self, s: &mut Session, f: Frame) -> Result<(), String> {
+    fn on_frame(&mut self, s: &mut Session, f: Frame, at: Instant) -> Result<(), String> {
         match f {
             Frame::Control(json) => {
                 match serde_json::from_str::<Ctl>(&json) {
@@ -459,7 +691,8 @@ impl Worker {
                 }
                 Ok(())
             }
-            Frame::Video { keyframe, rot, data, .. } => {
+            Frame::Video { keyframe, rot, data, pts_us } => {
+                s.flow.on_au(data.len(), keyframe, at.saturating_duration_since(s.started), pts_us);
                 if s.need_key && !keyframe {
                     return Ok(());
                 }
@@ -473,6 +706,7 @@ impl Worker {
                     self.stats.dropped_aus.fetch_add(1, Ordering::Relaxed);
                     self.stats.plis.fetch_add(1, Ordering::Relaxed);
                     s.need_key = true;
+                    s.key_asked = Instant::now();
                     send_json(&mut s.stream, KEYFRAME_REQ).map_err(|e| format!("send: {e}"))?;
                 } else if keyframe && matches!(self.conn.state(), ConnState::Connecting | ConnState::Reconnecting { .. }) {
                     self.conn_event(ConnEvent::MediaConnected);
@@ -511,6 +745,7 @@ impl Worker {
                 self.conn_event(ConnEvent::CameraResumed);
                 // The phone sends a keyframe on resume, but make sure the decoder resyncs.
                 s.need_key = true;
+                s.key_asked = Instant::now();
                 send_json(&mut s.stream, KEYFRAME_REQ).map_err(|e| format!("send: {e}"))?;
             }
             Ctl::Caps { width, height, fps, rotation, current, .. } => {
@@ -559,7 +794,7 @@ fn reader_loop(sid: u64, mut r: TcpStream, tx: mpsc::Sender<Msg>) {
     loop {
         match read_frame(&mut r) {
             Ok(f) => {
-                if tx.send(Msg::Frame(sid, f)).is_err() {
+                if tx.send(Msg::Frame(sid, f, Instant::now())).is_err() {
                     return;
                 }
             }
@@ -663,6 +898,36 @@ mod tests {
         assert_eq!(client_handshake(&mut s, &k()), Err("bad proof".into()));
         drop(s);
         assert!(!t.join().unwrap(), "PC must not send auth_ok after a bad proof");
+    }
+
+    #[test]
+    fn addresses_are_ipv4_first_and_link_local_is_skipped() {
+        let ips = ["fe80::1", "2001:db8::1", "192.168.1.9", "10.0.0.2", "192.168.1.9"].iter().map(|s| s.parse::<IpAddr>().unwrap());
+        let got: Vec<String> = order_addrs(ips, 9).iter().map(|a| a.to_string()).collect();
+        assert_eq!(got, ["10.0.0.2:9", "192.168.1.9:9", "[2001:db8::1]:9"]);
+    }
+
+    #[test]
+    fn retry_delays_are_half_one_two_seconds() {
+        assert_eq!([1, 2, 3, 9].map(retry_delay_ms), [500, 1000, 2000, 2000]);
+    }
+
+    #[test]
+    fn refused_connection_is_described() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        let e = open_stream(&addr).unwrap_err();
+        assert!(describe_connect_error(&e).contains("refused") || describe_connect_error(&e).contains("timeout"), "{e}");
+    }
+
+    #[test]
+    fn shutdown_waits_for_the_worker() {
+        let (h, _rx) = NativeReceiver::start_at("127.0.0.1:9".parse().unwrap(), k());
+        let t = Instant::now();
+        h.shutdown();
+        assert!(t.elapsed() < Duration::from_secs(3));
+        assert!(h.done.wait(Duration::from_millis(1)));
     }
 
     fn next_event(rx: &mut tmpsc::Receiver<TransportEvent>) -> TransportEvent {

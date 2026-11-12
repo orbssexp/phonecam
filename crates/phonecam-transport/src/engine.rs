@@ -140,6 +140,7 @@ pub(crate) fn spawn(
     events: TxSender<TransportEvent>,
     stats: Arc<SharedStats>,
     loss: Arc<AtomicU32>,
+    done: Arc<crate::Done>,
 ) {
     // str0m needs a process-wide crypto provider; installing twice is harmless.
     str0m::crypto::from_feature_flags().install_process_default();
@@ -184,6 +185,7 @@ pub(crate) fn spawn(
             eng.socks.stop_all();
             let _ = stop_tx.send(true);
             let _ = relay_thread.join();
+            done.set();
         })
         .expect("spawn transport thread");
 }

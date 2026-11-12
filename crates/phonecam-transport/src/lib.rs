@@ -20,8 +20,39 @@ pub use phonecam_core::path::PathKind;
 pub use phonecam_core::{Ctl, VcamFrame};
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc as tmpsc;
+
+/// How long `shutdown()` waits for the worker (and with it the relay socket) to finish.
+pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+
+/// Set once when a worker has fully stopped; lets `shutdown()` wait for it with a deadline.
+#[derive(Default)]
+pub(crate) struct Done {
+    flag: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Done {
+    pub(crate) fn set(&self) {
+        *self.flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.cv.notify_all();
+    }
+    /// Waits until `set()` was called or `max` passed; true when the worker finished.
+    pub(crate) fn wait(&self, max: Duration) -> bool {
+        let end = Instant::now() + max;
+        let mut g = self.flag.lock().unwrap_or_else(|e| e.into_inner());
+        while !*g {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            g = self.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -77,6 +108,10 @@ pub struct Stats {
     pub nacks: u64,
     /// Access units dropped because the consumer was too slow.
     pub dropped_aus: u64,
+    /// Received video bitrate over the last second, kbit/s (native source only; 0 otherwise).
+    pub rx_kbps: u32,
+    /// Estimated queuing delay between the phone's capture clock and arrival, ms (native only).
+    pub lag_ms: u32,
 }
 
 #[derive(Default)]
@@ -86,6 +121,8 @@ pub(crate) struct SharedStats {
     pub plis: AtomicU64,
     pub nacks: AtomicU64,
     pub dropped_aus: AtomicU64,
+    pub rx_kbps: AtomicU32,
+    pub lag_ms: AtomicU32,
 }
 
 impl SharedStats {
@@ -96,6 +133,8 @@ impl SharedStats {
             plis: self.plis.load(Ordering::Relaxed),
             nacks: self.nacks.load(Ordering::Relaxed),
             dropped_aus: self.dropped_aus.load(Ordering::Relaxed),
+            rx_kbps: self.rx_kbps.load(Ordering::Relaxed),
+            lag_ms: self.lag_ms.load(Ordering::Relaxed),
         }
     }
 }
@@ -105,6 +144,7 @@ pub struct ReceiverHandle {
     tx: mpsc::Sender<engine::Msg>,
     stats: Arc<SharedStats>,
     loss: Arc<AtomicU32>,
+    done: Arc<Done>,
 }
 
 impl ReceiverHandle {
@@ -128,9 +168,14 @@ impl ReceiverHandle {
     pub fn set_rx_loss_permille(&self, p: u32) {
         self.loss.store(p, Ordering::Relaxed);
     }
-    /// Stop all threads. Idempotent; events end after this.
+    /// Stop all threads and wait (at most [`SHUTDOWN_WAIT`]) until the relay socket is closed and
+    /// the worker has exited, so a new receiver for the same room does not hit a 409. Idempotent;
+    /// events end after this. Blocks: call it outside locks and off the async executor.
     pub fn shutdown(&self) {
         let _ = self.tx.send(engine::Msg::Cmd(engine::Cmd::Shutdown));
+        if !self.done.wait(SHUTDOWN_WAIT) {
+            tracing::warn!("[transport] worker did not stop within {} s", SHUTDOWN_WAIT.as_secs());
+        }
     }
 }
 
@@ -142,8 +187,9 @@ impl Receiver {
         let (tx, rx) = mpsc::channel();
         let stats = Arc::new(SharedStats::default());
         let loss = Arc::new(AtomicU32::new(0));
-        engine::spawn(cfg, tx.clone(), rx, ev_tx, stats.clone(), loss.clone());
-        (ReceiverHandle { tx, stats, loss }, ev_rx)
+        let done = Arc::new(Done::default());
+        engine::spawn(cfg, tx.clone(), rx, ev_tx, stats.clone(), loss.clone(), done.clone());
+        (ReceiverHandle { tx, stats, loss, done }, ev_rx)
     }
 }
 
