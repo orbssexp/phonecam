@@ -4,6 +4,7 @@
 mod logging;
 mod settings;
 mod state;
+mod updater;
 
 use base64::Engine;
 use phonecam_core::Ctl;
@@ -16,7 +17,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::mpsc::Receiver as EventRx;
@@ -298,6 +298,7 @@ impl Shared {
         let auto_rotation = self.auto_rotation();
         let g = self.lock();
         let v = &g.view;
+        let (update_version, update_progress) = updater::snapshot();
         AppState {
             phone_url: g.phone_url.clone(),
             qr_svg: g.qr_svg.clone(),
@@ -323,6 +324,8 @@ impl Shared {
             zoom_max: v.zoom_max,
             torch_available: v.torch_available,
             settings: g.settings.clone(),
+            update_version,
+            update_progress,
         }
     }
 
@@ -439,15 +442,14 @@ fn open_window(app: &AppHandle) {
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItemBuilder::with_id("open", "Open").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-    let menu = MenuBuilder::new(app).items(&[&open, &quit]).build()?;
+    let menu = updater::tray_menu(app, None)?;
     let mut tray = TrayIconBuilder::with_id("tray")
         .tooltip("PhoneCam")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, ev| match ev.id().as_ref() {
             "open" => open_window(app),
+            "install_update" => updater::spawn_install(app.clone()),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -490,8 +492,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| open_window(app)))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Arc::clone(&shared))
-        .invoke_handler(tauri::generate_handler![get_state, set_settings, new_pairing, get_preview])
+        .invoke_handler(tauri::generate_handler![get_state, set_settings, new_pairing, get_preview, updater::install_update])
         .on_window_event(|window, event| {
             // Minimize == hide to tray: destroy the webview (frees its RAM). Close already destroys it.
             if let WindowEvent::Resized(_) = event {
@@ -503,6 +506,7 @@ pub fn run() {
         .setup(move |app| {
             setup_tray(app.handle())?;
             spawn_state_emitter(app.handle().clone(), Arc::clone(&shared));
+            updater::spawn(app.handle().clone());
             open_window(app.handle());
             Ok(())
         })

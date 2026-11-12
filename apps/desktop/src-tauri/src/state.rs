@@ -54,6 +54,9 @@ pub struct AppState {
     pub zoom_max: f32,
     pub torch_available: bool,
     pub settings: Settings,
+    /// Version of a pending update (None when up to date) and its download percent while installing.
+    pub update_version: Option<String>,
+    pub update_progress: Option<u8>,
 }
 
 /// Connection-side state fed by transport events.
@@ -283,6 +286,8 @@ mod tests {
             zoom_max: 2.0,
             torch_available: false,
             settings: Settings::default(),
+            update_version: None,
+            update_progress: None,
         };
         let j = serde_json::to_value(&s).unwrap();
         for k in ["phoneUrl", "qrSvg", "conn", "pauseReason", "rttMs", "decoderName", "zoomMin", "torchAvailable", "settings", "srcWidth", "srcHeight", "srcFps", "phoneWidth", "phoneHeight", "phoneFps", "autoRotation"] {

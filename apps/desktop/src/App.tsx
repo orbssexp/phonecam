@@ -32,6 +32,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import { UpdateBanner } from "@/UpdateBanner";
 
 const PREVIEW_MAX_FPS = 15;
 
@@ -163,6 +164,8 @@ export default function App() {
 
   return (
     <div className="flex h-full min-w-[900px] flex-col gap-4 px-6 pt-5 pb-4">
+      <UpdateBanner state={state} />
+
       {/* Header: app name, muted status line, status tag on the right, hairline below */}
       <header className="flex items-start justify-between gap-6 border-b border-border pb-4">
         <div className="min-w-0">

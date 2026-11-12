@@ -50,6 +50,8 @@ export interface AppState {
   zoomMax: number;
   torchAvailable: boolean;
   settings: Settings;
+  updateVersion?: string | null;
+  updateProgress?: number | null;
 }
 
 const hasTauri = (): boolean =>
@@ -64,6 +66,8 @@ function normalizeState(s: AppState): AppState {
     phoneWidth: s.phoneWidth ?? null,
     phoneHeight: s.phoneHeight ?? null,
     phoneFps: s.phoneFps ?? null,
+    updateVersion: s.updateVersion ?? null,
+    updateProgress: s.updateProgress ?? null,
     settings: {
       ...s.settings,
       rotation: (s.settings?.rotation ?? 0) as 0 | 90 | 180 | 270,
@@ -154,6 +158,12 @@ export function newPairing(): Promise<AppState> {
 export function getPreview(): Promise<string | null> {
   if (!hasTauri()) return Promise.resolve(null);
   return invoke<string | null>("get_preview");
+}
+
+/** Download, install and relaunch. Resolves only on failure (the process exits on success). */
+export function installUpdate(): Promise<void> {
+  if (!hasTauri()) return Promise.resolve();
+  return invoke<void>("install_update");
 }
 
 export function onState(cb: (s: AppState) => void): Promise<UnlistenFn> {
