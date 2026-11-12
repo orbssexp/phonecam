@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Battery,
   BatteryCharging,
@@ -57,6 +57,12 @@ const CONN_DOT: Record<ConnState, string> = {
   live: "bg-success",
   paused: "bg-warning",
   reconnecting: "bg-warning",
+};
+
+const SOURCE_LABEL: Record<NonNullable<AppState["source"]>, string> = {
+  native: "Native (LAN)",
+  web: "Web (WebRTC)",
+  usb: "USB",
 };
 
 const PAUSE_LABEL: Record<NonNullable<AppState["pauseReason"]>, string> = {
@@ -228,16 +234,7 @@ export default function App() {
               {live ? <Video aria-hidden /> : <QrCode aria-hidden />}
               {CONN_LABEL[state.conn]}
             </Badge>
-            <Button
-              variant="outline"
-              size="icon"
-              className="bg-black"
-              onClick={() => void newPairing()}
-              aria-label="New pairing code"
-              title="New pairing code"
-            >
-              <QrCode aria-hidden />
-            </Button>
+            <NewPairingButton />
           </div>
         </section>
 
@@ -252,9 +249,48 @@ export default function App() {
       <footer className="flex items-center justify-between gap-4 border-t border-border pt-3 text-[12px] text-muted-foreground">
         <span className="truncate">Same Wi-Fi network or USB cable</span>
         <span className="truncate">Keep the phone unlocked with the app open</span>
-        <span className="shrink-0 font-mono text-[11px] tracking-[0.14em] uppercase">Preview max {PREVIEW_MAX_FPS} fps</span>
+        <span className="shrink-0 font-mono text-[11px] tracking-[0.14em] uppercase">
+          Preview max {PREVIEW_MAX_FPS} fps · v{__APP_VERSION__}
+        </span>
       </footer>
     </div>
+  );
+}
+
+/** Generating a new code unpairs the phone, so it takes two clicks within a few seconds. */
+function NewPairingButton() {
+  const [confirming, setConfirming] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  const onClick = () => {
+    window.clearTimeout(timer.current);
+    if (!confirming) {
+      setConfirming(true);
+      timer.current = window.setTimeout(() => setConfirming(false), 4000);
+      return;
+    }
+    setConfirming(false);
+    void newPairing();
+  };
+
+  if (confirming) {
+    return (
+      <Button
+        variant="outline"
+        className="h-8 bg-black px-3 font-mono text-[11px] tracking-[0.14em] uppercase"
+        onClick={onClick}
+        aria-label="Confirm: new pairing code, the phone will be unpaired"
+        title="Click again to unpair the phone and make a new code"
+      >
+        [ Unpair phone? ]
+      </Button>
+    );
+  }
+  return (
+    <Button variant="outline" size="icon" className="bg-black" onClick={onClick} aria-label="New pairing code" title="New pairing code">
+      <QrCode aria-hidden />
+    </Button>
   );
 }
 
@@ -294,6 +330,9 @@ function ConnectionCard({ state }: { state: AppState }) {
         )}
       </Row>
       <Row label="Latency">{state.rttMs != null ? `${Math.round(state.rttMs)} ms` : "—"}</Row>
+      <Row label="Source">{state.source ? SOURCE_LABEL[state.source] : "—"}</Row>
+      <Row label="Bitrate">{state.bitrateKbps ? `${(state.bitrateKbps / 1000).toFixed(1)} Mbps` : "—"}</Row>
+      <Row label="Delay">{state.delayMs != null ? `${state.delayMs} ms` : "—"}</Row>
       <Row label="Phone battery">
         {state.battery != null ? (
           <span className="flex items-center gap-1.5">

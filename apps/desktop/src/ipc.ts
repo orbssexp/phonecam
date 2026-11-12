@@ -36,6 +36,12 @@ export interface AppState {
   battery: number | null;
   charging: boolean | null;
   decoderName: string | null;
+  /** Where the stream comes from; null while idle. "usb" is reserved. */
+  source?: "native" | "web" | "usb" | null;
+  /** Received video bitrate, kbit/s (native source; 0 when unknown). */
+  bitrateKbps?: number;
+  /** Estimated queuing delay of the stream, ms (native source). */
+  delayMs?: number | null;
   fps: number;
   width: number;
   height: number;
@@ -61,6 +67,9 @@ function normalizeState(s: AppState): AppState {
     srcWidth: s.srcWidth ?? null,
     srcHeight: s.srcHeight ?? null,
     srcFps: s.srcFps ?? null,
+    source: s.source ?? null,
+    bitrateKbps: s.bitrateKbps ?? 0,
+    delayMs: s.delayMs ?? null,
     phoneWidth: s.phoneWidth ?? null,
     phoneHeight: s.phoneHeight ?? null,
     phoneFps: s.phoneFps ?? null,
@@ -91,6 +100,9 @@ let mockState: AppState = {
   battery: null,
   charging: null,
   decoderName: null,
+  source: null,
+  bitrateKbps: 0,
+  delayMs: null,
   fps: 0,
   width: 0,
   height: 0,
