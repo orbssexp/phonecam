@@ -2628,7 +2628,7 @@ dependencies = [
 
 [[package]]
 name = "phonecam-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hmac",
  "serde",
@@ -2638,7 +2638,7 @@ dependencies = [
 
 [[package]]
 name = "phonecam-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "phonecam-media-win"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "jpeg-encoder",
@@ -2669,7 +2669,7 @@ dependencies = [
 
 [[package]]
 name = "phonecam-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "getrandom 0.2.17",

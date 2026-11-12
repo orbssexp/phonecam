@@ -1,6 +1,6 @@
 [package]
 name = "phonecam-transport"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "PhoneCam desktop transport: relay signaling, str0m ICE-lite receiver, NACK/RTX, interface watch, heartbeat"

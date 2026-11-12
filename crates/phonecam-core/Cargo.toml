@@ -1,6 +1,6 @@
 [package]
 name = "phonecam-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Portable PhoneCam core: protocol, profiles, heartbeat, pairing, connection state machine"

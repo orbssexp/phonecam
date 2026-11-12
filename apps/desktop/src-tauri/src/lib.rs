@@ -15,7 +15,7 @@ use state::{AppState, View};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -50,8 +50,16 @@ pub struct Shared {
     rot_hint: AtomicU32,
     /// Which source owns the session (`SRC_*`): the first to authenticate, native preferred.
     active: AtomicU8,
+    /// Serialises receiver restarts: the old workers are stopped and awaited (outside `inner`)
+    /// before the next ones start.
+    restart_gate: Mutex<()>,
+    /// When `new_pairing` last ran (5 s cooldown; it unpairs the phone).
+    last_new_pairing: Mutex<Option<Instant>>,
     inner: Mutex<Inner>,
 }
+
+/// Minimum time between two `new_pairing` calls.
+const NEW_PAIRING_COOLDOWN: Duration = Duration::from_secs(5);
 
 const SRC_NONE: u8 = 0;
 const SRC_WEBRTC: u8 = 1;
@@ -76,6 +84,8 @@ impl Shared {
             cvo: AtomicI32::new(-1),
             rot_hint: AtomicU32::new(0),
             active: AtomicU8::new(SRC_NONE),
+            restart_gate: Mutex::new(()),
+            last_new_pairing: Mutex::new(None),
             inner: Mutex::new(Inner {
                 settings,
                 pairing,
@@ -86,7 +96,7 @@ impl Shared {
                 qr_svg: String::new(),
             }),
         });
-        shared.restart_receiver(&mut shared.lock());
+        shared.restart_receiver();
         shared
     }
 
@@ -94,15 +104,21 @@ impl Shared {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// (Re)start the transport receiver for the current pairing. Caller holds the lock.
-    fn restart_receiver(self: &Arc<Self>, inner: &mut Inner) {
-        if let Some(old) = inner.recv.take() {
-            old.shutdown();
-        }
-        if let Some(old) = inner.native.take() {
-            old.shutdown();
-        }
+    /// (Re)start the transport receiver for the current pairing. The old workers are stopped and
+    /// awaited (each waits up to 3 s for its relay socket to close) with the state lock released,
+    /// so the UI stays responsive and the relay never sees two desktops for one room (409).
+    fn restart_receiver(self: &Arc<Self>) {
+        let _gate = self.restart_gate.lock().unwrap_or_else(|p| p.into_inner());
+        let (old_recv, old_native) = {
+            let mut g = self.lock();
+            (g.recv.take(), g.native.take())
+        };
+        // Stale event threads stop at their next event; no event of theirs is handled from here on.
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.active.store(SRC_NONE, Ordering::SeqCst);
+        stop_receivers(old_recv, old_native);
+
+        let mut inner = self.lock();
         let cfg = Config {
             relay_url: self.relay_url.clone(),
             page_url: self.page_url.clone(),
@@ -124,7 +140,6 @@ impl Shared {
         inner.native = Some(nhandle);
         let (handle, rx) = Receiver::start(cfg);
         inner.recv = Some(handle);
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.media.set_frame(phonecam_core::VcamFrame::Placeholder);
         let me = Arc::clone(self);
         std::thread::Builder::new()
@@ -296,8 +311,11 @@ impl Shared {
     fn snapshot(&self) -> AppState {
         let stats = self.media.stats();
         let auto_rotation = self.auto_rotation();
+        let active = self.active.load(Ordering::SeqCst);
         let g = self.lock();
         let v = &g.view;
+        let native = if active == SRC_NATIVE { g.native.as_ref().map(|h| h.stats()) } else { None };
+        let live = matches!(v.conn, state::ConnUi::Live | state::ConnUi::Paused | state::ConnUi::Reconnecting);
         AppState {
             phone_url: g.phone_url.clone(),
             qr_svg: g.qr_svg.clone(),
@@ -318,6 +336,13 @@ impl Shared {
             phone_height: v.phone_height,
             phone_fps: v.phone_fps.round() as u32,
             auto_rotation,
+            source: match active {
+                SRC_NATIVE => Some("native"),
+                SRC_WEBRTC => Some("web"),
+                _ => None,
+            },
+            bitrate_kbps: native.filter(|_| live).map_or(0, |n| n.rx_kbps),
+            delay_ms: native.filter(|_| live).map(|n| n.lag_ms),
             lenses: v.lenses.clone(),
             zoom_min: v.zoom_min,
             zoom_max: v.zoom_max,
@@ -351,11 +376,20 @@ impl Shared {
 
     fn new_pairing(self: &Arc<Self>) -> AppState {
         {
+            let mut last = self.last_new_pairing.lock().unwrap_or_else(|p| p.into_inner());
+            if last.is_some_and(|t| t.elapsed() < NEW_PAIRING_COOLDOWN) {
+                tracing::info!("[app] new pairing ignored: asked again within {} s", NEW_PAIRING_COOLDOWN.as_secs());
+                drop(last);
+                return self.snapshot();
+            }
+            *last = Some(Instant::now());
+        }
+        {
             let mut g = self.lock();
             g.pairing = Pairing::generate();
             settings::save_pairing(&self.dir, &g.pairing);
-            self.restart_receiver(&mut g);
         }
+        self.restart_receiver();
         self.snapshot()
     }
 
@@ -383,18 +417,32 @@ impl Shared {
         }
     }
 
+    /// Quit: stop both sources and wait until their relay sockets are closed (a relaunch would
+    /// otherwise be refused with 409 while the relay still holds the old desktop), then the media.
     fn shutdown(&self) {
         tracing::info!("[app] shutting down");
-        let mut g = self.lock();
-        if let Some(h) = g.recv.take() {
-            h.shutdown();
-        }
-        if let Some(h) = g.native.take() {
-            h.shutdown();
-        }
-        drop(g);
+        let _gate = self.restart_gate.lock().unwrap_or_else(|p| p.into_inner());
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let (recv, native) = {
+            let mut g = self.lock();
+            (g.recv.take(), g.native.take())
+        };
+        stop_receivers(recv, native);
         self.media.shutdown();
     }
+}
+
+/// Stops both sources in parallel and waits for them (each blocks up to 3 s). Never call this
+/// while holding the state lock.
+fn stop_receivers(recv: Option<ReceiverHandle>, native: Option<NativeHandle>) {
+    std::thread::scope(|sc| {
+        if let Some(h) = &recv {
+            sc.spawn(|| h.shutdown());
+        }
+        if let Some(h) = &native {
+            sc.spawn(|| h.shutdown());
+        }
+    });
 }
 
 #[tauri::command(async)]

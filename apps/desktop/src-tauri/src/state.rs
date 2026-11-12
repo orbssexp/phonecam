@@ -49,6 +49,12 @@ pub struct AppState {
     pub phone_fps: u32,
     /// Automatic rotation currently applied (degrees clockwise): RTP orientation or phone hint.
     pub auto_rotation: u16,
+    /// Where the stream comes from: "native" or "web" ("usb" is reserved); `None` while idle.
+    pub source: Option<&'static str>,
+    /// Received video bitrate in kbit/s (native source; 0 when unknown).
+    pub bitrate_kbps: u32,
+    /// Estimated queuing delay between the phone's capture clock and arrival, ms (native only).
+    pub delay_ms: Option<u32>,
     pub lenses: Vec<LensInfo>,
     pub zoom_min: f32,
     pub zoom_max: f32,
@@ -278,6 +284,9 @@ mod tests {
             phone_height: 6,
             phone_fps: 30,
             auto_rotation: 0,
+            source: Some("native"),
+            bitrate_kbps: 8000,
+            delay_ms: Some(40),
             lenses: vec![],
             zoom_min: 1.0,
             zoom_max: 2.0,
@@ -285,7 +294,7 @@ mod tests {
             settings: Settings::default(),
         };
         let j = serde_json::to_value(&s).unwrap();
-        for k in ["phoneUrl", "qrSvg", "conn", "pauseReason", "rttMs", "decoderName", "zoomMin", "torchAvailable", "settings", "srcWidth", "srcHeight", "srcFps", "phoneWidth", "phoneHeight", "phoneFps", "autoRotation"] {
+        for k in ["phoneUrl", "qrSvg", "conn", "pauseReason", "rttMs", "decoderName", "zoomMin", "torchAvailable", "settings", "srcWidth", "srcHeight", "srcFps", "phoneWidth", "phoneHeight", "phoneFps", "autoRotation", "source", "bitrateKbps", "delayMs"] {
             assert!(j.get(k).is_some(), "{k}");
         }
         assert_eq!(j["conn"], "live");
