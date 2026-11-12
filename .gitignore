@@ -9,3 +9,5 @@ spike/*.csv
 apps/desktop/dist/
 apps/desktop/src-tauri/vendor/
 apps/desktop/src-tauri/gen/
+
+/dist-release/
